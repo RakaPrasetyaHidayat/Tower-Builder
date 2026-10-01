@@ -1,0 +1,28 @@
+{
+  "name": "tower-builder-server",
+  "version": "1.0.0",
+  "description": "Tower Builder Colyseus Game Server",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "dev:server": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@colyseus/schema": "^2.0.36",
+    "@colyseus/tools": "^0.15.22",
+    "@prisma/client": "^6.4.1",
+    "colyseus": "^0.15.42",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.17.19",
+    "prisma": "^6.4.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}

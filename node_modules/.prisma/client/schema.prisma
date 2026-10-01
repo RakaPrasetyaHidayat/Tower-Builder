@@ -1,0 +1,67 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  GAME_MASTER
+  PLAYER
+}
+
+enum MatchStatus {
+  LOBBY
+  PLAYING
+  PAUSED
+  FINISHED
+}
+
+model User {
+  id             String             @id @default(cuid())
+  username       String             @unique
+  email          String?            @unique
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+  hostedMatches  Match[]            @relation("HostMatches")
+  participations MatchParticipant[]
+
+  @@map("users")
+}
+
+model Match {
+  id              String             @id @default(cuid())
+  roomCode        String             @unique @db.VarChar(6)
+  status          MatchStatus        @default(LOBBY)
+  hostId          String
+  host            User               @relation("HostMatches", fields: [hostId], references: [id], onDelete: Cascade)
+  maxPlayers      Int                @default(30)
+  durationSeconds Int                @default(180)
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime           @default(now())
+  updatedAt       DateTime           @updatedAt
+  participants    MatchParticipant[]
+
+  @@map("matches")
+}
+
+model MatchParticipant {
+  id          String   @id @default(cuid())
+  matchId     String
+  match       Match    @relation(fields: [matchId], references: [id], onDelete: Cascade)
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  role        Role     @default(PLAYER)
+  nickname    String
+  score       Int      @default(0)
+  towerHeight Int      @default(0)
+  rank        Int?
+  joinedAt    DateTime @default(now())
+
+  @@unique([matchId, nickname])
+  @@index([matchId, score(sort: Desc)])
+  @@map("match_participants")
+}

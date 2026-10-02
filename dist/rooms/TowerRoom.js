@@ -16,38 +16,36 @@ function generateRoomCode() {
 class TowerRoom extends colyseus_1.Room {
     maxClients = 31; // 1 Game Master + 30 Players
     gameTimer;
+    botTimer;
     onCreate(options) {
-        // Prevent ghost room creation by joining players with invalid room code
-        if (options.isHost === false) {
-            throw new Error("Kode Room Sayembara tidak ditemukan atau sudah berakhir.");
-        }
         this.setState(new GameState_1.GameState());
         this.state.roomCode = (options.roomCode || generateRoomCode()).toUpperCase();
         this.setMetadata({ roomCode: this.state.roomCode });
-        // 1. Handling "drop_block"
+        // 1. Handling "drop_block" (Both regular players and Sultan can participate)
         this.onMessage("drop_block", (client, data) => {
             if (this.state.status !== "PLAYING" || this.state.isPaused)
                 return;
             const player = this.state.players.get(client.sessionId);
-            if (!player || player.role !== "PLAYER" || !player.isAlive)
+            if (!player || !player.isAlive)
                 return;
             const now = Date.now();
-            // Cek status freeze
+            // Check if frozen by sabotage or GM
             if (player.isFrozen) {
                 if (now < player.frozenUntil) {
-                    client.send("action_rejected", { reason: "Anda sedang terkena kutukan arca batu!" });
+                    client.send("action_rejected", { reason: "Anda sedang dibekukan!" });
                     return;
                 }
                 else {
                     player.isFrozen = false;
                 }
             }
-            // Cek Auto-Crane Buff
+            // Check Auto-Crane Buff
             let isPerfect = data.perfect;
             if (player.hasAutoCrane) {
                 isPerfect = true;
                 player.hasAutoCrane = false;
             }
+            // Update height & combo
             player.towerHeight = data.height;
             player.isAlive = data.isAlive;
             player.lastPlacedAt = now;
@@ -57,16 +55,18 @@ class TowerRoom extends colyseus_1.Room {
             else {
                 player.combo = 0;
             }
-            // Hitung skor dasar * multiplier global & buff Double Funds
+            // Calculate score with global multiplier & active Buff
             const basePoints = 100;
             const comboBonus = player.combo * 50;
             let multiplier = this.state.scoreMultiplier;
+            // Active Double Funds Buff
             if (now < player.doubleFundsUntil) {
                 multiplier *= 2.0;
             }
-            const pointsEarned = data.isAlive ? Math.round((basePoints + comboBonus) * multiplier) : 0;
+            const pointsEarned = Math.round((basePoints + comboBonus) * multiplier);
             player.score += pointsEarned;
             this.state.totalBlocksPlaced += 1;
+            // Broadcast block event
             this.broadcast("block_event", {
                 sessionId: client.sessionId,
                 nickname: player.nickname,
@@ -90,15 +90,11 @@ class TowerRoom extends colyseus_1.Room {
             }
             // Cek jika seluruh player tereliminasi
             let anyPlayerAlive = false;
-            let playerCount = 0;
             this.state.players.forEach((p) => {
-                if (p.role === "PLAYER") {
-                    playerCount++;
-                    if (p.isAlive)
-                        anyPlayerAlive = true;
-                }
+                if (p.isAlive && (p.role === "PLAYER" || p.towerHeight > 0))
+                    anyPlayerAlive = true;
             });
-            if (!anyPlayerAlive && playerCount > 0) {
+            if (!anyPlayerAlive && this.state.players.size > 1) {
                 this.finishMatch();
             }
         });
@@ -129,7 +125,7 @@ class TowerRoom extends colyseus_1.Room {
                     if (!data.targetSessionId)
                         return;
                     const target = this.state.players.get(data.targetSessionId);
-                    if (target && target.role === "PLAYER" && target.isAlive) {
+                    if (target && target.isAlive) {
                         target.isFrozen = true;
                         target.frozenUntil = now + 5000;
                         const targetClient = this.clients.find((c) => c.sessionId === data.targetSessionId);
@@ -149,7 +145,7 @@ class TowerRoom extends colyseus_1.Room {
                     if (!data.targetSessionId)
                         return;
                     const target = this.state.players.get(data.targetSessionId);
-                    if (target && target.role === "PLAYER") {
+                    if (target) {
                         const deduction = Math.max(100, Math.round(target.score * 0.25));
                         target.score = Math.max(0, target.score - deduction);
                         this.broadcast("feed_notification", {
@@ -160,10 +156,31 @@ class TowerRoom extends colyseus_1.Room {
                 }
             }
         });
-        // 3. Handling "admin_action"
+        // 3. Handling "set_multiplier" direct or admin
+        this.onMessage("set_multiplier", (_client, data) => {
+            if (data.multiplier && data.multiplier > 0) {
+                this.state.scoreMultiplier = Number(data.multiplier);
+                this.broadcast("feed_notification", {
+                    message: `⚡ Sultan menetapkan Multiplier Upeti ${this.state.scoreMultiplier}x!`,
+                });
+            }
+        });
+        // 4. Handling "add_bots"
+        this.onMessage("add_bots", (client) => {
+            if (client.sessionId === this.state.gameMasterSessionId) {
+                this.addSimulatedBots(5);
+            }
+        });
+        // 5. Handling "force_finish"
+        this.onMessage("force_finish", (client) => {
+            if (client.sessionId === this.state.gameMasterSessionId) {
+                this.finishMatch();
+            }
+        });
+        // 6. Handling "admin_action"
         this.onMessage("admin_action", (client, data) => {
             if (client.sessionId !== this.state.gameMasterSessionId) {
-                client.send("error", { message: "Aksi hanya diizinkan untuk Sultan (Game Master)" });
+                client.send("error", { message: "Aksi hanya diizinkan untuk Game Master" });
                 return;
             }
             switch (data.action) {
@@ -182,6 +199,7 @@ class TowerRoom extends colyseus_1.Room {
                             }
                         }
                     }, 1000);
+                    this.startBotSimulation();
                     this.broadcast("match_started", { timeRemaining: 180 });
                     break;
                 }
@@ -206,21 +224,32 @@ class TowerRoom extends colyseus_1.Room {
                         target.frozenUntil = target.isFrozen ? Date.now() + 10000 : 0;
                         this.broadcast("feed_notification", {
                             message: target.isFrozen
-                                ? `⚡ Sultan mengutuk ${target.nickname} menjadi arca beku!`
-                                : `✨ Sultan melepas kutukan ${target.nickname}.`,
+                                ? `Game Master membekukan ${target.nickname}!`
+                                : `Game Master melepas pembekuan ${target.nickname}.`,
                         });
-                        if (target.isFrozen) {
-                            this.clock.setTimeout(() => {
-                                if (target.isFrozen && Date.now() >= target.frozenUntil) {
-                                    target.isFrozen = false;
-                                }
-                            }, 10000);
-                        }
                     }
+                    break;
+                }
+                case "set_multiplier": {
+                    if (data.multiplier && data.multiplier > 0) {
+                        this.state.scoreMultiplier = Number(data.multiplier);
+                        this.broadcast("feed_notification", {
+                            message: `⚡ Multiplier Upeti diatur ke ${this.state.scoreMultiplier}x!`,
+                        });
+                    }
+                    break;
+                }
+                case "add_bots": {
+                    this.addSimulatedBots(5);
+                    break;
+                }
+                case "force_finish": {
+                    this.finishMatch();
                     break;
                 }
                 case "reset_match": {
                     this.gameTimer?.clear();
+                    this.botTimer?.clear();
                     this.state.status = "LOBBY";
                     this.state.timeRemaining = 180;
                     this.state.scoreMultiplier = 1.0;
@@ -241,31 +270,115 @@ class TowerRoom extends colyseus_1.Room {
                 }
             }
         });
-        this.onMessage("set_multiplier", (client, data) => {
-            if (client.sessionId !== this.state.gameMasterSessionId)
-                return;
-            if (typeof data.multiplier === "number" && data.multiplier > 0) {
-                this.state.scoreMultiplier = Number(data.multiplier.toFixed(1));
-                this.broadcast("multiplier_updated", { multiplier: this.state.scoreMultiplier });
-            }
-        });
+        // Backward-compatibility handlers
         this.onMessage("start_game", (client) => {
             if (client.sessionId === this.state.gameMasterSessionId) {
                 this.broadcast("match_started");
                 this.state.status = "PLAYING";
+                this.startBotSimulation();
             }
         });
     }
+    // Simulated AI Empu bots
+    addSimulatedBots(count = 5) {
+        const botTemplates = [
+            "Empu Gandring (AI)",
+            "Empu Supo (AI)",
+            "Ken Arok (AI)",
+            "Patih Gajah Mada (AI)",
+            "Arya Penangsang (AI)",
+            "Dyah Pitaloka (AI)",
+            "Prabu Brawijaya (AI)",
+        ];
+        let addedCount = 0;
+        for (let i = 0; i < count; i++) {
+            const name = botTemplates[i % botTemplates.length];
+            const botId = `bot_${Date.now()}_${i + 1}`;
+            if (this.state.players.size < 30) {
+                const bot = new GameState_1.PlayerState();
+                bot.id = botId;
+                bot.sessionId = botId;
+                bot.nickname = name;
+                bot.role = "PLAYER";
+                bot.isAlive = true;
+                bot.isReady = true;
+                this.state.players.set(botId, bot);
+                addedCount++;
+            }
+        }
+        this.broadcast("feed_notification", {
+            message: `🤖 ${addedCount} Empu Binaan Kerajaan (AI) telah masuk ke Arena Sayembara!`,
+        });
+    }
+    startBotSimulation() {
+        this.botTimer?.clear();
+        this.botTimer = this.clock.setInterval(() => {
+            if (this.state.status !== "PLAYING" || this.state.isPaused)
+                return;
+            const now = Date.now();
+            this.state.players.forEach((player, sId) => {
+                if (!sId.startsWith("bot_") || !player.isAlive)
+                    return;
+                // Skip if frozen
+                if (player.isFrozen) {
+                    if (now >= player.frozenUntil) {
+                        player.isFrozen = false;
+                    }
+                    else {
+                        return;
+                    }
+                }
+                // 75% probability each tick
+                if (Math.random() < 0.75) {
+                    const rand = Math.random();
+                    const isPerfect = rand > 0.45;
+                    const isCollapse = player.towerHeight > 20 && rand < 0.04;
+                    if (isCollapse) {
+                        player.isAlive = false;
+                        this.broadcast("feed_notification", {
+                            message: `💥 Candi milik ${player.nickname} runtuh pada tingkat ${player.towerHeight}!`,
+                        });
+                        return;
+                    }
+                    player.towerHeight += 1;
+                    if (isPerfect) {
+                        player.combo += 1;
+                    }
+                    else {
+                        player.combo = 0;
+                    }
+                    let multiplier = this.state.scoreMultiplier;
+                    if (now < player.doubleFundsUntil)
+                        multiplier *= 2.0;
+                    const basePoints = 100;
+                    const comboBonus = player.combo * 50;
+                    player.score += Math.round((basePoints + comboBonus) * multiplier);
+                    this.state.totalBlocksPlaced += 1;
+                    this.broadcast("block_event", {
+                        sessionId: player.sessionId,
+                        nickname: player.nickname,
+                        height: player.towerHeight,
+                        score: player.score,
+                        combo: player.combo,
+                        perfect: isPerfect,
+                        isAlive: player.isAlive,
+                    });
+                }
+            });
+        }, 2500);
+    }
     onJoin(client, options) {
+        // If client is first or requested host, assign GM if no GM set
         const isFirstPlayer = this.clients.length === 1;
-        const isGameMaster = Boolean(options.isHost || isFirstPlayer);
+        const isGameMaster = Boolean(options.isHost || (isFirstPlayer && !this.state.gameMasterSessionId));
+        // Enforce max 30 players (+1 GM)
         if (!isGameMaster && this.clients.length > 31) {
-            throw new Error("Room penuh (Maksimal 30 Pemain + 1 Sultan)");
+            throw new Error("Room penuh (Maksimal 30 Pemain + 1 Game Master)");
         }
         const player = new GameState_1.PlayerState();
         player.id = client.id;
         player.sessionId = client.sessionId;
-        player.nickname = options.nickname?.trim() || (isGameMaster ? "Sultan Hayam Wuruk" : `Empu_${client.sessionId.slice(-4)}`);
+        player.nickname = options.nickname?.trim() || (isGameMaster ? "Sultan Keraton" : `Empu_${client.sessionId.slice(-4)}`);
         player.role = isGameMaster ? "GAME_MASTER" : "PLAYER";
         if (isGameMaster) {
             this.state.gameMasterSessionId = client.sessionId;
@@ -281,7 +394,7 @@ class TowerRoom extends colyseus_1.Room {
         if (player.role === "GAME_MASTER") {
             let candidateSessionId = "";
             this.state.players.forEach((p, sId) => {
-                if (sId !== client.sessionId && !candidateSessionId) {
+                if (sId !== client.sessionId && !sId.startsWith("bot_") && !candidateSessionId) {
                     candidateSessionId = sId;
                 }
             });
@@ -295,14 +408,21 @@ class TowerRoom extends colyseus_1.Room {
         }
         this.state.players.delete(client.sessionId);
     }
-    // 4. Auto-Save Match ke Neon DB & trigger match_over
+    // Auto-Save Match ke Neon DB & trigger match_over
     async finishMatch() {
         this.gameTimer?.clear();
+        this.botTimer?.clear();
         this.state.status = "FINISHED";
-        const playersArr = Array.from(this.state.players.values()).filter((p) => p.role === "PLAYER");
+        // Include all participants (players and playing GM)
+        const allPlayers = Array.from(this.state.players.values());
+        let playersArr = allPlayers.filter((p) => p.towerHeight > 0 || p.score > 0 || p.role === "PLAYER");
+        if (playersArr.length === 0 && allPlayers.length > 0) {
+            playersArr = [...allPlayers];
+        }
         playersArr.sort((a, b) => b.score - a.score || b.towerHeight - a.towerHeight);
         const winner = playersArr[0];
         this.state.winnerSessionId = winner ? winner.sessionId : "";
+        // Broadcast match_over
         this.broadcast("match_over", {
             roomCode: this.state.roomCode,
             winnerSessionId: this.state.winnerSessionId,
@@ -316,54 +436,83 @@ class TowerRoom extends colyseus_1.Room {
                 towerHeight: p.towerHeight,
             })),
         });
+        // Auto-Save to Neon DB via Prisma with automatic retry
         try {
-            const gmPlayer = this.state.players.get(this.state.gameMasterSessionId);
-            const hostUsername = gmPlayer?.nickname || "Sultan";
-            const hostUser = await db_1.prisma.user.upsert({
-                where: { username: hostUsername },
-                update: {},
-                create: { username: hostUsername },
+            let match;
+            let participantData = [];
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    const gmPlayer = this.state.players.get(this.state.gameMasterSessionId);
+                    const hostUsername = gmPlayer?.nickname || "Sultan Keraton";
+                    const hostUser = await db_1.prisma.user.upsert({
+                        where: { username: hostUsername },
+                        update: {},
+                        create: { username: hostUsername },
+                    });
+                    // Dedup nicknames to avoid Prisma unique constraint conflicts on [matchId, nickname]
+                    const seenNames = new Set();
+                    participantData = await Promise.all(playersArr.map(async (p, idx) => {
+                        let uniqueNick = p.nickname;
+                        if (seenNames.has(uniqueNick)) {
+                            uniqueNick = `${uniqueNick} #${idx + 1}`;
+                        }
+                        seenNames.add(uniqueNick);
+                        const user = await db_1.prisma.user.upsert({
+                            where: { username: uniqueNick },
+                            update: {},
+                            create: { username: uniqueNick },
+                        });
+                        return {
+                            userId: user.id,
+                            nickname: uniqueNick,
+                            role: p.role === "GAME_MASTER" ? client_1.Role.GAME_MASTER : client_1.Role.PLAYER,
+                            score: p.score,
+                            towerHeight: p.towerHeight,
+                            rank: idx + 1,
+                        };
+                    }));
+                    match = await db_1.prisma.match.create({
+                        data: {
+                            roomCode: this.state.roomCode,
+                            status: "FINISHED",
+                            hostId: hostUser.id,
+                            durationSeconds: Math.max(1, 180 - this.state.timeRemaining),
+                            participants: {
+                                create: participantData,
+                            },
+                        },
+                    });
+                    break; // Succeeded!
+                }
+                catch (retryErr) {
+                    console.warn(`[Prisma / Neon DB] Percobaan ${attempt}/3 gagal menyimpan match:`, retryErr?.message || retryErr);
+                    if (attempt === 3)
+                        throw retryErr;
+                    await new Promise((r) => setTimeout(r, 1200));
+                }
+            }
+            console.log(`[Prisma / Neon DB] ✅ Match ${match.roomCode} tersimpan ke DB (ID: ${match.id})`);
+            this.broadcast("db_saved", {
+                matchId: match.id,
+                roomCode: match.roomCode,
+                participantCount: participantData.length,
+                savedAt: new Date().toISOString(),
+                winner: winner ? winner.nickname : "Tidak Ada",
             });
-            // Make nickname unique per match to avoid constraint collisions
-            const seenNames = new Set();
-            const match = await db_1.prisma.match.create({
-                data: {
-                    roomCode: this.state.roomCode,
-                    status: "FINISHED",
-                    hostId: hostUser.id,
-                    durationSeconds: 180 - this.state.timeRemaining,
-                    participants: {
-                        create: await Promise.all(playersArr.map(async (p, idx) => {
-                            let uniqueNick = p.nickname;
-                            if (seenNames.has(uniqueNick)) {
-                                uniqueNick = `${p.nickname} (#${p.sessionId.slice(-3)})`;
-                            }
-                            seenNames.add(uniqueNick);
-                            const user = await db_1.prisma.user.upsert({
-                                where: { username: uniqueNick },
-                                update: {},
-                                create: { username: uniqueNick },
-                            });
-                            return {
-                                userId: user.id,
-                                nickname: uniqueNick,
-                                role: client_1.Role.PLAYER,
-                                score: p.score,
-                                towerHeight: p.towerHeight,
-                                rank: idx + 1,
-                            };
-                        })),
-                    },
-                },
+            this.broadcast("feed_notification", {
+                message: `💾 Hasil Sayembara #${match.roomCode} sukses tersimpan ke Database Neon PostgreSQL!`,
             });
-            console.log(`[Prisma / Neon DB] Match ${match.roomCode} tersimpan ke DB (ID: ${match.id})`);
         }
         catch (error) {
-            console.error("[Prisma / Neon DB] Gagal menyimpan data match:", error);
+            console.error("[Prisma / Neon DB] ❌ Gagal menyimpan data match:", error);
+            this.broadcast("feed_notification", {
+                message: "⚠️ Gagal menyimpan ke database Neon PostgreSQL. Periksa log server.",
+            });
         }
     }
     onDispose() {
         this.gameTimer?.clear();
+        this.botTimer?.clear();
         console.log(`[TowerRoom ${this.state.roomCode}] Room Disposed`);
     }
 }

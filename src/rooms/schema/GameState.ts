@@ -1,33 +1,62 @@
-import { Schema, type, MapSchema } from "@colyseus/schema";
+import { Schema, MapSchema, defineTypes } from "@colyseus/schema";
 
 export class PlayerState extends Schema {
-  @type("string") id: string = "";
-  @type("string") sessionId: string = "";
-  @type("string") nickname: string = "Player";
-  @type("string") role: "GAME_MASTER" | "PLAYER" = "PLAYER";
-  @type("number") score: number = 0;
-  @type("number") towerHeight: number = 0;
-  @type("number") combo: number = 0;
-  @type("boolean") isAlive: boolean = true;
-  @type("boolean") isReady: boolean = false;
-  @type("number") lastPlacedAt: number = 0;
+  id: string = "";
+  sessionId: string = "";
+  nickname: string = "Player";
+  role: "GAME_MASTER" | "PLAYER" = "PLAYER";
+  score: number = 0;
+  towerHeight: number = 0;
+  combo: number = 0;
+  isAlive: boolean = true;
+  isReady: boolean = false;
+  lastPlacedAt: number = 0;
 
   // Buff & Sabotage State
-  @type("boolean") isFrozen: boolean = false;
-  @type("number") frozenUntil: number = 0;
-  @type("number") doubleFundsUntil: number = 0;
-  @type("boolean") hasAutoCrane: boolean = false;
+  isFrozen: boolean = false;
+  frozenUntil: number = 0;
+  doubleFundsUntil: number = 0;
+  hasAutoCrane: boolean = false;
 }
+
+defineTypes(PlayerState, {
+  id: "string",
+  sessionId: "string",
+  nickname: "string",
+  role: "string",
+  score: "number",
+  towerHeight: "number",
+  combo: "number",
+  isAlive: "boolean",
+  isReady: "boolean",
+  lastPlacedAt: "number",
+  isFrozen: "boolean",
+  frozenUntil: "number",
+  doubleFundsUntil: "number",
+  hasAutoCrane: "boolean"
+});
 
 export class GameState extends Schema {
-  @type("string") roomCode: string = "";
-  @type("string") gameMasterSessionId: string = "";
-  @type("string") status: "LOBBY" | "PLAYING" | "PAUSED" | "FINISHED" = "LOBBY";
-  @type("number") timeRemaining: number = 180;
-  @type("number") scoreMultiplier: number = 1.0;
-  @type("boolean") isPaused: boolean = false;
-  @type("number") totalBlocksPlaced: number = 0;
-  @type("string") winnerSessionId: string = "";
+  roomCode: string = "";
+  gameMasterSessionId: string = "";
+  status: "LOBBY" | "PLAYING" | "PAUSED" | "FINISHED" = "LOBBY";
+  timeRemaining: number = 180;
+  scoreMultiplier: number = 1.0;
+  isPaused: boolean = false;
+  totalBlocksPlaced: number = 0;
+  winnerSessionId: string = "";
 
-  @type({ map: PlayerState }) players = new MapSchema<PlayerState>();
+  players = new MapSchema<PlayerState>();
 }
+
+defineTypes(GameState, {
+  roomCode: "string",
+  gameMasterSessionId: "string",
+  status: "string",
+  timeRemaining: "number",
+  scoreMultiplier: "number",
+  isPaused: "boolean",
+  totalBlocksPlaced: "number",
+  winnerSessionId: "string",
+  players: { map: PlayerState }
+});

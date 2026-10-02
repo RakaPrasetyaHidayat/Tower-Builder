@@ -10,8 +10,79 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+import { prisma } from "./db";
+
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", service: "Tower Builder Colyseus Game Server" });
+});
+
+app.get("/api/db/health", async (_req, res) => {
+  try {
+    const userCount = await prisma.user.count();
+    const matchCount = await prisma.match.count();
+    return res.json({
+      status: "connected",
+      database: "Neon PostgreSQL",
+      users: userCount,
+      matches: matchCount,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error: any) {
+    return res.status(500).json({
+      status: "error",
+      message: error?.message || "Database connection failed",
+    });
+  }
+});
+
+app.get("/api/leaderboard", async (_req, res) => {
+  try {
+    const topParticipants = await prisma.matchParticipant.findMany({
+      take: 15,
+      orderBy: { score: "desc" },
+      include: {
+        match: {
+          select: {
+            roomCode: true,
+            createdAt: true,
+          },
+        },
+      },
+    });
+
+    return res.json({
+      leaderboard: topParticipants.map((p, idx) => ({
+        rank: idx + 1,
+        nickname: p.nickname,
+        score: p.score,
+        towerHeight: p.towerHeight,
+        roomCode: p.match?.roomCode,
+        createdAt: p.joinedAt,
+      })),
+    });
+  } catch (error: any) {
+    return res.status(500).json({ error: "Failed to fetch leaderboard" });
+  }
+});
+
+app.get("/api/matches", async (_req, res) => {
+  try {
+    const matches = await prisma.match.findMany({
+      take: 10,
+      orderBy: { createdAt: "desc" },
+      include: {
+        host: { select: { username: true } },
+        participants: {
+          orderBy: { score: "desc" },
+          take: 5,
+        },
+      },
+    });
+
+    return res.json({ matches });
+  } catch (error: any) {
+    return res.status(500).json({ error: "Failed to fetch matches" });
+  }
 });
 
 app.get("/api/room/:code", async (req, res) => {

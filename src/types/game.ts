@@ -49,3 +49,12 @@ export interface BlockPlacePayload {
   scoreAdded?: number;
   combo?: number;
 }
+
+export interface DbSavedPayload {
+  matchId: string;
+  roomCode: string;
+  participantCount: number;
+  savedAt: string;
+  winner?: string;
+}
+

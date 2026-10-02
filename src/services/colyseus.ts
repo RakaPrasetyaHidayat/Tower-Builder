@@ -1,5 +1,14 @@
 import { Client, Room } from "colyseus.js";
 
+export function getApiBaseUrl(): string {
+  if (import.meta.env.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
+  const hostname = window.location.hostname || "localhost";
+  return `${protocol}//${hostname}:2567`;
+}
+
 function getWsUrl(): string {
   if (import.meta.env.VITE_WS_URL) {
     return import.meta.env.VITE_WS_URL;
@@ -69,4 +78,10 @@ export async function joinGameRoom(
       )
     ),
   ]);
+}
+
+export async function reconnectGameRoom(
+  reconnectionToken: string
+): Promise<Room<any>> {
+  return colyseusClient.reconnect(reconnectionToken);
 }

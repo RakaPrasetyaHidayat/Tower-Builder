@@ -1,7 +1,11 @@
-import React, { useEffect, useRef } from "react";
+import { useEffect, useRef, useImperativeHandle, forwardRef } from "react";
 import Phaser from "phaser";
 import { TowerScene } from "../game/scenes/TowerScene";
 import type { DropBlockData } from "../game/scenes/TowerScene";
+
+export interface PhaserTowerGameHandle {
+  triggerDrop: () => void;
+}
 
 interface PhaserTowerGameProps {
   isPlaying: boolean;
@@ -11,64 +15,86 @@ interface PhaserTowerGameProps {
   onTowerCollapsed: (data: { height: number; tiltSum: number }) => void;
 }
 
-export const PhaserTowerGame: React.FC<PhaserTowerGameProps> = ({
-  isPlaying,
-  isPaused,
-  isFrozen,
-  onDropBlock,
-  onTowerCollapsed,
-}) => {
-  const containerRef = useRef<HTMLDivElement | null>(null);
-  const gameRef = useRef<Phaser.Game | null>(null);
-  const sceneRef = useRef<TowerScene | null>(null);
+export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGameProps>(
+  (
+    { isPlaying, isPaused, isFrozen, onDropBlock, onTowerCollapsed },
+    ref
+  ) => {
+    const containerRef = useRef<HTMLDivElement | null>(null);
+    const gameRef = useRef<Phaser.Game | null>(null);
+    const sceneRef = useRef<TowerScene | null>(null);
 
-  useEffect(() => {
-    if (!containerRef.current) return;
-
-    const config: Phaser.Types.Core.GameConfig = {
-      type: Phaser.AUTO,
-      parent: containerRef.current,
-      width: containerRef.current.clientWidth || 380,
-      height: containerRef.current.clientHeight || 560,
-      backgroundColor: "#070b14",
-      scale: {
-        mode: Phaser.Scale.RESIZE,
-        autoCenter: Phaser.Scale.CENTER_BOTH,
+    useImperativeHandle(ref, () => ({
+      triggerDrop: () => {
+        if (sceneRef.current) {
+          sceneRef.current.triggerDrop();
+        }
       },
-      scene: [TowerScene],
-    };
+    }));
 
-    const game = new Phaser.Game(config);
-    gameRef.current = game;
+    useEffect(() => {
+      if (!containerRef.current) return;
 
-    game.events.once("ready", () => {
-      const scene = game.scene.getScene("TowerScene") as TowerScene;
-      sceneRef.current = scene;
-      scene.init({
-        onDropBlock,
-        onTowerCollapsed,
+      const config: Phaser.Types.Core.GameConfig = {
+        type: Phaser.AUTO,
+        parent: containerRef.current,
+        width: window.innerWidth,
+        height: window.innerHeight,
+        backgroundColor: "#0c1524",
+        transparent: false,
+        scale: {
+          mode: Phaser.Scale.RESIZE,
+          autoCenter: Phaser.Scale.CENTER_BOTH,
+        },
+        // Prevent Phaser from pausing on blur/visibility change
+        callbacks: {
+          postBoot: (game) => {
+            game.events.off("blur");
+            game.events.off("focus");
+          },
+        },
+        // Disable right-click context menu on canvas
+        input: {
+          touch: {
+            capture: true,
+          },
+        },
+        scene: [TowerScene],
+      };
+
+      const game = new Phaser.Game(config);
+      gameRef.current = game;
+
+      game.events.once("ready", () => {
+        const scene = game.scene.getScene("TowerScene") as TowerScene;
+        sceneRef.current = scene;
+        scene.init({
+          onDropBlock,
+          onTowerCollapsed,
+        });
       });
-    });
 
-    return () => {
-      game.destroy(true);
-      gameRef.current = null;
-      sceneRef.current = null;
-    };
-  }, []);
+      return () => {
+        game.destroy(true);
+        gameRef.current = null;
+        sceneRef.current = null;
+      };
+    }, []);
 
-  // Sync state changes with scene
-  useEffect(() => {
-    if (sceneRef.current) {
-      sceneRef.current.setPauseState(isPaused || !isPlaying);
-      sceneRef.current.setFrozenState(isFrozen);
-    }
-  }, [isPlaying, isPaused, isFrozen]);
+    // Sync state changes with scene
+    useEffect(() => {
+      if (sceneRef.current) {
+        sceneRef.current.setPauseState(isPaused || !isPlaying);
+        sceneRef.current.setFrozenState(isFrozen);
+      }
+    }, [isPlaying, isPaused, isFrozen]);
 
-  return (
-    <div
-      ref={containerRef}
-      className="relative w-full h-[64vh] sm:h-[70vh] rounded-2xl overflow-hidden border border-slate-800 shadow-2xl shadow-indigo-950/40 select-none"
-    />
-  );
-};
+    return (
+      <div
+        ref={containerRef}
+        className="absolute inset-0 w-full h-full select-none touch-none"
+        style={{ touchAction: "none" }}
+      />
+    );
+  }
+);

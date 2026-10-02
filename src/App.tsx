@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import type { Room } from "colyseus.js";
-import { createGameRoom, joinGameRoom } from "./services/colyseus";
-import type { GameStateData, BlockPlacePayload, CardOption, CardType } from "./types/game";
+import { createGameRoom, joinGameRoom, reconnectGameRoom } from "./services/colyseus";
+import type { GameStateData, BlockPlacePayload, CardOption, CardType, DbSavedPayload } from "./types/game";
 import { Lobby } from "./components/Lobby";
 import { AdminDashboard } from "./components/AdminDashboard";
 import { PlayerView } from "./components/PlayerView";
@@ -22,49 +22,86 @@ export function App() {
   const [showSummary, setShowSummary] = useState<boolean>(false);
   // Toast notifications feed
   const [feedNotification, setFeedNotification] = useState<string | null>(null);
+  // Neon DB match saved info
+  const [dbSavedInfo, setDbSavedInfo] = useState<DbSavedPayload | null>(null);
+  // Game Master View Mode: "play" (playable arena with Sultan HUD) or "dashboard" (full GM spectator deck)
+  const [gmViewMode, setGmViewMode] = useState<"play" | "dashboard">("play");
 
   const setupRoomListeners = useCallback((activeRoom: Room<any>) => {
     const syncState = (state: any) => {
-      if (!state || !state.players) return;
+      if (!state) return;
+
+      if (state.roomCode) {
+        sessionStorage.setItem("tb_room_code", state.roomCode);
+      }
 
       const playersObj: Record<string, any> = {};
-      state.players.forEach((player: any, key: string) => {
-        playersObj[key] = {
-          id: player.id,
-          sessionId: player.sessionId,
-          nickname: player.nickname,
-          role: player.role,
-          score: player.score,
-          towerHeight: player.towerHeight,
-          combo: player.combo,
-          isAlive: player.isAlive,
-          isReady: player.isReady,
-          lastPlacedAt: player.lastPlacedAt,
-          isFrozen: player.isFrozen,
-          frozenUntil: player.frozenUntil,
-          doubleFundsUntil: player.doubleFundsUntil,
-          hasAutoCrane: player.hasAutoCrane,
-        };
-      });
+      if (state.players) {
+        if (typeof state.players.forEach === "function") {
+          state.players.forEach((player: any, key: string) => {
+            if (player) {
+              playersObj[key] = {
+                id: player.id || key,
+                sessionId: player.sessionId || key,
+                nickname: player.nickname || "Pemain",
+                role: player.role || "PLAYER",
+                score: player.score ?? 0,
+                towerHeight: player.towerHeight ?? 0,
+                combo: player.combo ?? 0,
+                isAlive: player.isAlive ?? true,
+                isReady: player.isReady ?? false,
+                lastPlacedAt: player.lastPlacedAt ?? 0,
+                isFrozen: Boolean(player.isFrozen),
+                frozenUntil: player.frozenUntil ?? 0,
+                doubleFundsUntil: player.doubleFundsUntil ?? 0,
+                hasAutoCrane: Boolean(player.hasAutoCrane),
+              };
+            }
+          });
+        } else if (typeof state.players === "object") {
+          Object.entries(state.players).forEach(([key, player]: [string, any]) => {
+            if (player) {
+              playersObj[key] = {
+                id: player.id || key,
+                sessionId: player.sessionId || key,
+                nickname: player.nickname || "Pemain",
+                role: player.role || "PLAYER",
+                score: player.score ?? 0,
+                towerHeight: player.towerHeight ?? 0,
+                combo: player.combo ?? 0,
+                isAlive: player.isAlive ?? true,
+                isReady: player.isReady ?? false,
+                lastPlacedAt: player.lastPlacedAt ?? 0,
+                isFrozen: Boolean(player.isFrozen),
+                frozenUntil: player.frozenUntil ?? 0,
+                doubleFundsUntil: player.doubleFundsUntil ?? 0,
+                hasAutoCrane: Boolean(player.hasAutoCrane),
+              };
+            }
+          });
+        }
+      }
 
       if (state.status === "FINISHED") {
         setShowSummary(true);
       }
 
       setGameState({
-        roomCode: state.roomCode,
-        gameMasterSessionId: state.gameMasterSessionId,
-        status: state.status,
-        timeRemaining: state.timeRemaining,
-        scoreMultiplier: state.scoreMultiplier,
-        isPaused: state.isPaused,
-        totalBlocksPlaced: state.totalBlocksPlaced,
-        winnerSessionId: state.winnerSessionId,
+        roomCode: state.roomCode || "",
+        gameMasterSessionId: state.gameMasterSessionId || "",
+        status: state.status || "LOBBY",
+        timeRemaining: state.timeRemaining ?? 180,
+        scoreMultiplier: state.scoreMultiplier ?? 1.0,
+        isPaused: Boolean(state.isPaused),
+        totalBlocksPlaced: state.totalBlocksPlaced ?? 0,
+        winnerSessionId: state.winnerSessionId || "",
         players: playersObj,
       });
     };
 
-    activeRoom.onStateChange(syncState);
+    activeRoom.onStateChange((state) => {
+      syncState(state);
+    });
     if (activeRoom.state) {
       syncState(activeRoom.state);
     }
@@ -80,6 +117,13 @@ export function App() {
       setTimeout(() => setFeedNotification(null), 4000);
     });
 
+    // Neon DB save broadcast
+    activeRoom.onMessage("db_saved", (data: DbSavedPayload) => {
+      setDbSavedInfo(data);
+      setFeedNotification(`💾 Match #${data.roomCode} sukses tersimpan ke Database Neon PostgreSQL!`);
+      setTimeout(() => setFeedNotification(null), 5000);
+    });
+
     activeRoom.onMessage("match_over", () => {
       setShowSummary(true);
     });
@@ -87,6 +131,7 @@ export function App() {
     activeRoom.onMessage("match_reset", () => {
       setShowSummary(false);
       setCardChoices(null);
+      setDbSavedInfo(null);
       setRoundId((prev) => prev + 1);
     });
 
@@ -96,11 +141,15 @@ export function App() {
     });
 
     activeRoom.onLeave(() => {
+      sessionStorage.removeItem("tb_room_code");
+      sessionStorage.removeItem("tb_nickname");
+      sessionStorage.removeItem("tb_reconnect_token");
       setRoom(null);
       setGameState(null);
       setIsLoading(false);
       setCardChoices(null);
       setShowSummary(false);
+      setDbSavedInfo(null);
     });
 
     activeRoom.onError((code, message) => {
@@ -109,11 +158,49 @@ export function App() {
     });
   }, []);
 
+  // Auto-reconnect / stay in room on F5 page refresh
+  useEffect(() => {
+    const savedRoomCode = sessionStorage.getItem("tb_room_code");
+    const savedNickname = sessionStorage.getItem("tb_nickname");
+    const savedToken = sessionStorage.getItem("tb_reconnect_token");
+
+    if (savedRoomCode && savedNickname && !room) {
+      setIsLoading(true);
+      const restoreSession = async () => {
+        try {
+          let activeRoom: Room<any> | null = null;
+          if (savedToken) {
+            try {
+              activeRoom = await reconnectGameRoom(savedToken);
+            } catch (_) {
+              // Token reconnect failed, fallback to joinOrCreate
+            }
+          }
+          if (!activeRoom) {
+            activeRoom = await joinGameRoom(savedRoomCode, savedNickname);
+          }
+          sessionStorage.setItem("tb_reconnect_token", activeRoom.reconnectionToken || "");
+          setRoom(activeRoom);
+          setupRoomListeners(activeRoom);
+        } catch (_) {
+          sessionStorage.removeItem("tb_room_code");
+          sessionStorage.removeItem("tb_nickname");
+          sessionStorage.removeItem("tb_reconnect_token");
+        } finally {
+          setIsLoading(false);
+        }
+      };
+      restoreSession();
+    }
+  }, [setupRoomListeners]);
+
   const handleCreate = async (nickname: string) => {
     setIsLoading(true);
     setError(null);
     try {
       const newRoom = await createGameRoom(nickname);
+      sessionStorage.setItem("tb_nickname", nickname);
+      sessionStorage.setItem("tb_reconnect_token", newRoom.reconnectionToken || "");
       setRoom(newRoom);
       setupRoomListeners(newRoom);
     } catch (err: any) {
@@ -128,6 +215,9 @@ export function App() {
     setError(null);
     try {
       const joinedRoom = await joinGameRoom(roomCode, nickname);
+      sessionStorage.setItem("tb_room_code", roomCode);
+      sessionStorage.setItem("tb_nickname", nickname);
+      sessionStorage.setItem("tb_reconnect_token", joinedRoom.reconnectionToken || "");
       setRoom(joinedRoom);
       setupRoomListeners(joinedRoom);
     } catch (err: any) {
@@ -138,6 +228,9 @@ export function App() {
   };
 
   const handleLeave = () => {
+    sessionStorage.removeItem("tb_room_code");
+    sessionStorage.removeItem("tb_nickname");
+    sessionStorage.removeItem("tb_reconnect_token");
     if (room) {
       room.leave();
     }
@@ -145,6 +238,7 @@ export function App() {
     setGameState(null);
     setCardChoices(null);
     setShowSummary(false);
+    setDbSavedInfo(null);
   };
 
   // Admin actions
@@ -157,6 +251,7 @@ export function App() {
   const handleResetGame = () => {
     setShowSummary(false);
     setCardChoices(null);
+    setDbSavedInfo(null);
     setRoundId((prev) => prev + 1);
     room?.send("admin_action", { action: "reset_match" });
   };
@@ -165,6 +260,10 @@ export function App() {
   };
   const handleSetMultiplier = (multiplier: number) =>
     room?.send("set_multiplier", { multiplier });
+  const handleForceFinish = () =>
+    room?.send("force_finish");
+  const handleAddBots = () =>
+    room?.send("add_bots");
 
   // Player drop block
   const handlePlaceBlock = (payload: BlockPlacePayload) => {
@@ -209,7 +308,7 @@ export function App() {
     <>
       {/* Toast Notification Banner */}
       {feedNotification && (
-        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-stone-900/95 border-2 border-amber-500/60 backdrop-blur-md text-amber-200 text-xs font-bold shadow-2xl shadow-black/80 animate-bounce">
+        <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-stone-900/95 border-2 border-amber-500/60 backdrop-blur-md text-amber-200 text-xs font-bold shadow-2xl shadow-black/80 animate-bounce text-center max-w-md">
           {feedNotification}
         </div>
       )}
@@ -232,20 +331,25 @@ export function App() {
           roomCode={gameState.roomCode}
           currentSessionId={mySessionId}
           isGameMaster={isGameMaster}
+          dbSavedInfo={dbSavedInfo}
           onRestart={isGameMaster ? handleResetGame : undefined}
           onClose={() => setShowSummary(false)}
         />
       )}
 
-      {isGameMaster ? (
+      {isGameMaster && gmViewMode === "dashboard" ? (
         <AdminDashboard
           state={gameState}
+          dbSavedInfo={dbSavedInfo}
           onStart={handleStart}
           onPause={handlePause}
           onResume={handleResume}
           onSetMultiplier={handleSetMultiplier}
           onFreezePlayer={handleFreezePlayer}
           onResetGame={handleResetGame}
+          onForceFinish={handleForceFinish}
+          onAddBots={handleAddBots}
+          onSwitchToPlay={() => setGmViewMode("play")}
           onLeave={handleLeave}
         />
       ) : (
@@ -253,8 +357,16 @@ export function App() {
           key={roundId}
           state={gameState}
           sessionId={mySessionId}
+          isGameMaster={isGameMaster}
           onPlaceBlock={handlePlaceBlock}
           onLeave={handleLeave}
+          onStart={handleStart}
+          onPause={handlePause}
+          onResume={handleResume}
+          onSetMultiplier={handleSetMultiplier}
+          onForceFinish={handleForceFinish}
+          onAddBots={handleAddBots}
+          onSwitchToDashboard={() => setGmViewMode("dashboard")}
         />
       )}
     </>

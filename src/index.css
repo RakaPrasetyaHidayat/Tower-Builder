@@ -4,29 +4,25 @@
 
 @layer base {
   body {
-    @apply m-0 p-0 font-sans antialiased text-amber-50 select-none overflow-x-hidden;
-    background: radial-gradient(circle at 50% 20%, #29150d 0%, #170d08 60%, #0c0604 100%);
+    @apply m-0 p-0 font-sans antialiased text-slate-800 select-none overflow-x-hidden;
+    background: linear-gradient(185deg, #0284c7 0%, #38bdf8 35%, #e0f2fe 70%, #fef3c7 100%);
     background-attachment: fixed;
+    min-height: 100vh;
   }
 }
 
-/* Custom Indonesian Temple & Royal Wood/Gold utility textures */
-.bg-batik-pattern {
-  background-color: #1a0f0a;
-  background-image: radial-gradient(#d97706 0.75px, transparent 0.75px), radial-gradient(#b45309 0.75px, #1a0f0a 0.75px);
-  background-size: 30px 30px;
-  background-position: 0 0, 15px 15px;
+/* Custom Royal Kingdom & Temple casual utilities */
+.bg-sky-kingdom {
+  background: linear-gradient(180deg, #38bdf8 0%, #7dd3fc 40%, #f0f9ff 100%);
 }
 
-.candi-stone-border {
-  border: 1px solid rgba(217, 119, 6, 0.35);
-  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.6), 0 0 15px rgba(245, 158, 11, 0.15);
+.kingdom-card {
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(16px);
+  border: 2px solid rgba(224, 231, 255, 0.8);
+  box-shadow: 0 20px 40px -15px rgba(15, 23, 42, 0.12);
 }
 
-.keraton-gold-gradient {
-  background: linear-gradient(135deg, #fef3c7 0%, #f59e0b 50%, #b45309 100%);
-}
-
-.candi-shadow {
-  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.7), inset 0 1px 1px rgba(255, 255, 255, 0.15);
+.royal-gold-gradient {
+  background: linear-gradient(135deg, #fbbf24 0%, #f59e0b 50%, #d97706 100%);
 }

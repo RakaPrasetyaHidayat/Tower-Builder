@@ -15,8 +15,12 @@ export class PlayerState extends Schema {
   // Buff & Sabotage State
   isFrozen: boolean = false;
   frozenUntil: number = 0;
-  doubleFundsUntil: number = 0;
-  hasAutoCrane: boolean = false;
+  budgetBlocksRemaining: number = 0;
+  hasBLT: boolean = false;
+
+  // Question Building mode
+  canPlaceBlock: boolean = true;   // false = jawaban salah, tunggu jeda
+  currentQuestionIdx: number = 0;  // index pertanyaan saat ini
 }
 
 defineTypes(PlayerState, {
@@ -32,8 +36,10 @@ defineTypes(PlayerState, {
   lastPlacedAt: "number",
   isFrozen: "boolean",
   frozenUntil: "number",
-  doubleFundsUntil: "number",
-  hasAutoCrane: "boolean"
+  budgetBlocksRemaining: "number",
+  hasBLT: "boolean",
+  canPlaceBlock: "boolean",
+  currentQuestionIdx: "number",
 });
 
 export class GameState extends Schema {
@@ -45,6 +51,7 @@ export class GameState extends Schema {
   isPaused: boolean = false;
   totalBlocksPlaced: number = 0;
   winnerSessionId: string = "";
+  gameMode: "fast_building" | "question_building" = "fast_building";
 
   players = new MapSchema<PlayerState>();
 }
@@ -58,5 +65,6 @@ defineTypes(GameState, {
   isPaused: "boolean",
   totalBlocksPlaced: "number",
   winnerSessionId: "string",
+  gameMode: "string",
   players: { map: PlayerState }
 });

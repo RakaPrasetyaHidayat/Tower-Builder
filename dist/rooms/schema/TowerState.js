@@ -12,9 +12,12 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.TowerState = exports.Player = void 0;
 const schema_1 = require("@colyseus/schema");
 class Player extends schema_1.Schema {
-    name = "Player";
-    score = 0;
-    isReady = false;
+    constructor() {
+        super(...arguments);
+        this.name = "Player";
+        this.score = 0;
+        this.isReady = false;
+    }
 }
 exports.Player = Player;
 __decorate([
@@ -30,9 +33,12 @@ __decorate([
     __metadata("design:type", Boolean)
 ], Player.prototype, "isReady", void 0);
 class TowerState extends schema_1.Schema {
-    players = new schema_1.MapSchema();
-    status = "waiting"; // "waiting", "playing", "gameover"
-    currentTowerHeight = 0;
+    constructor() {
+        super(...arguments);
+        this.players = new schema_1.MapSchema();
+        this.status = "waiting"; // "waiting", "playing", "gameover"
+        this.currentTowerHeight = 0;
+    }
 }
 exports.TowerState = TowerState;
 __decorate([

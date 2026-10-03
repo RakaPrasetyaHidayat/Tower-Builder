@@ -13,23 +13,83 @@ function generateRoomCode() {
     }
     return code;
 }
+// Acak soal tanpa pengulangan per sesi
+function shuffleQuestions(questions) {
+    const arr = [...questions];
+    for (let i = arr.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+}
+// ── TowerRoom ───────────────────────────────────────────────────────────────
 class TowerRoom extends colyseus_1.Room {
-    maxClients = 31; // 1 Game Master + 30 Players
-    gameTimer;
-    botTimer;
+    constructor() {
+        super(...arguments);
+        this.maxClients = 31;
+        // Per-player question queues (sessionId → shuffled question list)
+        this.playerQuestions = new Map();
+        this.customQuestions = [];
+        // Track apakah jawaban terakhir player benar (untuk syarat card choice di QB mode)
+        this.playerLastAnswerCorrect = new Map();
+        this.blockScoreLedger = new Map();
+    }
     onCreate(options) {
         this.setState(new GameState_1.GameState());
         this.state.roomCode = (options.roomCode || generateRoomCode()).toUpperCase();
         this.setMetadata({ roomCode: this.state.roomCode });
-        // 1. Handling "drop_block" (Both regular players and Sultan can participate)
+        this.onMessage("get_custom_questions", (client) => {
+            if (client.sessionId === this.state.gameMasterSessionId) {
+                client.send("custom_questions", { questions: this.customQuestions });
+            }
+        });
+        this.onMessage("set_custom_questions", (client, data) => {
+            if (client.sessionId !== this.state.gameMasterSessionId) {
+                client.send("action_rejected", { reason: "Hanya Sultan yang dapat mengatur soal." });
+                return;
+            }
+            if (this.state.status !== "LOBBY") {
+                client.send("action_rejected", { reason: "Soal hanya dapat diubah saat masih di lobby." });
+                return;
+            }
+            if (!Array.isArray(data?.questions) || data.questions.length > 500) {
+                client.send("action_rejected", { reason: "Daftar soal tidak valid." });
+                return;
+            }
+            const questions = data.questions;
+            const valid = questions.every((question) => Boolean(question) && typeof question === "object" &&
+                typeof question.text === "string" && question.text.trim().length > 0 && question.text.length <= 500 &&
+                Array.isArray(question.options) && question.options.length === 4 &&
+                question.options.every((option) => typeof option === "string" && option.trim().length > 0 && option.length <= 200) &&
+                Number.isInteger(question.correctIndex) && question.correctIndex >= 0 && question.correctIndex < 4 &&
+                typeof question.category === "string" && question.category.length <= 80);
+            if (!valid) {
+                client.send("action_rejected", { reason: "Lengkapi pertanyaan, empat pilihan, kategori, dan jawaban benar." });
+                return;
+            }
+            this.customQuestions = questions.map((question, index) => ({
+                id: index + 1,
+                text: question.text.trim(),
+                options: question.options.map((option) => option.trim()),
+                correctIndex: question.correctIndex,
+                category: question.category.trim() || "Umum",
+            }));
+            this.playerQuestions.clear();
+            client.send("custom_questions", { questions: this.customQuestions });
+        });
+        // ── drop_block ─────────────────────────────────────────────────────────
         this.onMessage("drop_block", (client, data) => {
             if (this.state.status !== "PLAYING" || this.state.isPaused)
                 return;
             const player = this.state.players.get(client.sessionId);
             if (!player || !player.isAlive)
                 return;
+            // Question Building: cek apakah player boleh meletakkan blok
+            if (this.state.gameMode === "question_building" && !player.canPlaceBlock) {
+                client.send("action_rejected", { reason: "Jawab pertanyaan dulu!" });
+                return;
+            }
             const now = Date.now();
-            // Check if frozen by sabotage or GM
             if (player.isFrozen) {
                 if (now < player.frozenUntil) {
                     client.send("action_rejected", { reason: "Anda sedang dibekukan!" });
@@ -39,13 +99,7 @@ class TowerRoom extends colyseus_1.Room {
                     player.isFrozen = false;
                 }
             }
-            // Check Auto-Crane Buff
-            let isPerfect = data.perfect;
-            if (player.hasAutoCrane) {
-                isPerfect = true;
-                player.hasAutoCrane = false;
-            }
-            // Update height & combo
+            const isPerfect = data.perfect;
             player.towerHeight = data.height;
             player.isAlive = data.isAlive;
             player.lastPlacedAt = now;
@@ -55,18 +109,19 @@ class TowerRoom extends colyseus_1.Room {
             else {
                 player.combo = 0;
             }
-            // Calculate score with global multiplier & active Buff
             const basePoints = 100;
             const comboBonus = player.combo * 50;
             let multiplier = this.state.scoreMultiplier;
-            // Active Double Funds Buff
-            if (now < player.doubleFundsUntil) {
-                multiplier *= 2.0;
+            if (player.budgetBlocksRemaining > 0) {
+                multiplier *= 2;
+                player.budgetBlocksRemaining -= 1;
             }
             const pointsEarned = Math.round((basePoints + comboBonus) * multiplier);
             player.score += pointsEarned;
+            const blockScores = this.blockScoreLedger.get(client.sessionId) ?? [];
+            blockScores.push(pointsEarned);
+            this.blockScoreLedger.set(client.sessionId, blockScores);
             this.state.totalBlocksPlaced += 1;
-            // Broadcast block event
             this.broadcast("block_event", {
                 sessionId: client.sessionId,
                 nickname: player.nickname,
@@ -76,131 +131,194 @@ class TowerRoom extends colyseus_1.Room {
                 perfect: isPerfect,
                 isAlive: player.isAlive,
             });
-            // Setiap kelipatan 5 balok, kirim event trigger_card_choice (Pusaka Sakti Nusantara)
-            if (player.isAlive && player.towerHeight > 0 && player.towerHeight % 5 === 0) {
-                client.send("trigger_card_choice", {
-                    height: player.towerHeight,
-                    options: [
-                        { type: "DOUBLE_FUNDS", category: "BUFF", name: "Berkah Dewi Sri", description: "Skor upeti 2x selama 10 detik" },
-                        { type: "AUTO_CRANE", category: "BUFF", name: "Tangan Sakti Empu", description: "Balok berikutnya 100% presisi sempurna" },
-                        { type: "LAND_DISPUTE", category: "SABOTASE", name: "Kutukan Jonggrang", description: "Jadikan lawan arca batu beku selama 5 detik" },
-                        { type: "CORRUPTION", category: "SABOTASE", name: "Upeti Kadipaten", description: "Potong 25% skor upeti target lawan" },
-                    ],
-                });
+            // Question Building: setelah blok ditempatkan/miss, kirim soal berikutnya
+            if (this.state.gameMode === "question_building") {
+                player.canPlaceBlock = false;
+                // Card choice setiap 5 blok di QB mode:
+                // Hanya jika jawaban terakhir BENAR dan blok BERHASIL MENDARAT (bukan miss)
+                // data.diff === 999 artinya tower collapse (bukan miss biasa)
+                // data.height > 0 dan data.isAlive true = blok mendarat normal
+                const blockLanded = data.isAlive && Math.abs(data.diff) <= 1.0; // diff ≤ 1.0 = mendarat (bukan miss yang diff=999)
+                const lastAnswerCorrect = this.playerLastAnswerCorrect.get(client.sessionId) ?? false;
+                if (blockLanded &&
+                    lastAnswerCorrect &&
+                    player.isAlive &&
+                    player.towerHeight > 0 &&
+                    player.towerHeight % 5 === 0) {
+                    this.sendCardChoice(client, player.towerHeight);
+                }
+                this.sendNextQuestion(client, player);
             }
-            // Cek jika seluruh player tereliminasi
+            else {
+                // Fast Building: card choice setiap 5 blok
+                if (player.isAlive && player.towerHeight > 0 && player.towerHeight % 5 === 0) {
+                    this.sendCardChoice(client, player.towerHeight);
+                }
+            }
             let anyPlayerAlive = false;
             this.state.players.forEach((p) => {
                 if (p.isAlive && (p.role === "PLAYER" || p.towerHeight > 0))
                     anyPlayerAlive = true;
             });
-            if (!anyPlayerAlive && this.state.players.size > 1) {
+            if (!anyPlayerAlive && this.state.players.size > 1)
                 this.finishMatch();
+        });
+        // ── answer_question (Question Building mode) ───────────────────────────
+        this.onMessage("answer_question", (client, data) => {
+            if (this.state.status !== "PLAYING" || this.state.isPaused)
+                return;
+            if (this.state.gameMode !== "question_building")
+                return;
+            const player = this.state.players.get(client.sessionId);
+            if (!player || !player.isAlive)
+                return;
+            const questions = this.playerQuestions.get(client.sessionId);
+            if (!questions?.length)
+                return;
+            const idx = player.currentQuestionIdx % questions.length;
+            const question = questions[idx];
+            if (!question || question.id !== data.questionId)
+                return;
+            const isCorrect = data.answerIndex === question.correctIndex;
+            // Simpan hasil jawaban — dipakai saat blok mendarat untuk syarat card choice
+            this.playerLastAnswerCorrect.set(client.sessionId, isCorrect);
+            if (isCorrect) {
+                // Jawaban benar → boleh letakkan blok
+                player.canPlaceBlock = true;
+                player.currentQuestionIdx += 1;
+                client.send("question_result", {
+                    correct: true,
+                    correctIndex: question.correctIndex,
+                    message: "✅ Benar! Susun balok sekarang!",
+                });
+            }
+            else {
+                // Jawaban salah → tidak bisa letakkan blok, jeda 3 detik lalu soal baru
+                player.canPlaceBlock = false;
+                player.currentQuestionIdx += 1;
+                client.send("question_result", {
+                    correct: false,
+                    correctIndex: question.correctIndex,
+                    message: "❌ Salah! Tunggu 3 detik untuk soal berikutnya.",
+                    penaltyMs: 3000,
+                });
+                // Setelah 3 detik, kirim soal berikutnya
+                this.clock.setTimeout(() => {
+                    if (player.isAlive && this.state.status === "PLAYING") {
+                        this.sendNextQuestion(client, player);
+                    }
+                }, 3000);
             }
         });
-        // 2. Handling "select_card"
+        // ── select_card ────────────────────────────────────────────────────────
         this.onMessage("select_card", (client, data) => {
             const player = this.state.players.get(client.sessionId);
             if (!player || !player.isAlive)
                 return;
-            const now = Date.now();
             switch (data.cardType) {
-                case "DOUBLE_FUNDS": {
-                    player.doubleFundsUntil = now + 10000;
-                    client.send("card_applied", { cardType: "DOUBLE_FUNDS", durationMs: 10000 });
-                    this.broadcast("feed_notification", {
-                        message: `✨ ${player.nickname} menerima Berkah Dewi Sri (2x Upeti Skor)!`,
-                    });
+                case "BUDGET_EFFICIENCY": {
+                    player.budgetBlocksRemaining = 3;
+                    client.send("card_applied", { cardType: "BUDGET_EFFICIENCY", blocks: 3 });
+                    this.broadcast("feed_notification", { message: `✨ Efisiensi Anggaran aktif untuk 3 blok ${player.nickname}!` });
                     break;
                 }
-                case "AUTO_CRANE": {
-                    player.hasAutoCrane = true;
-                    client.send("card_applied", { cardType: "AUTO_CRANE" });
-                    this.broadcast("feed_notification", {
-                        message: `🔨 ${player.nickname} mengaktifkan Tangan Sakti Empu!`,
-                    });
+                case "LIQUID_BUDGET": {
+                    client.send("card_applied", { cardType: "LIQUID_BUDGET", blocks: 2 });
+                    this.broadcast("feed_notification", { message: `🏗️ Anggaran Cair menyusun 2 blok gratis untuk ${player.nickname}!` });
                     break;
                 }
-                case "LAND_DISPUTE": {
-                    if (!data.targetSessionId)
+                case "BLT": {
+                    player.hasBLT = true;
+                    client.send("card_applied", { cardType: "BLT" });
+                    this.broadcast("feed_notification", { message: `🛡️ BLT melindungi ${player.nickname} dari sabotase berikutnya.` });
+                    break;
+                }
+                case "CORRUPTION":
+                case "STALLED_PROJECT":
+                case "BUILDING_EVICTION": {
+                    if (!data.targetSessionId || data.targetSessionId === client.sessionId)
                         return;
                     const target = this.state.players.get(data.targetSessionId);
-                    if (target && target.isAlive) {
-                        target.isFrozen = true;
-                        target.frozenUntil = now + 5000;
-                        const targetClient = this.clients.find((c) => c.sessionId === data.targetSessionId);
-                        targetClient?.send("frozen_notification", { durationMs: 5000 });
-                        this.broadcast("feed_notification", {
-                            message: `❄️ ${player.nickname} mengutuk ${target.nickname} menjadi arca beku (5s)!`,
-                        });
-                        this.clock.setTimeout(() => {
-                            if (target.isFrozen && Date.now() >= target.frozenUntil) {
-                                target.isFrozen = false;
-                            }
-                        }, 5000);
-                    }
-                    break;
-                }
-                case "CORRUPTION": {
-                    if (!data.targetSessionId)
+                    if (!target || !target.isAlive)
                         return;
-                    const target = this.state.players.get(data.targetSessionId);
-                    if (target) {
-                        const deduction = Math.max(100, Math.round(target.score * 0.25));
-                        target.score = Math.max(0, target.score - deduction);
-                        this.broadcast("feed_notification", {
-                            message: `🔥 ${player.nickname} menarik Upeti Kadipaten dari ${target.nickname} (-${deduction} Poin)!`,
-                        });
-                    }
+                    this.applySabotage(data.cardType, player, target);
                     break;
                 }
             }
         });
-        // 3. Handling "set_multiplier" direct or admin
+        // ── set_multiplier ─────────────────────────────────────────────────────
         this.onMessage("set_multiplier", (_client, data) => {
             if (data.multiplier && data.multiplier > 0) {
                 this.state.scoreMultiplier = Number(data.multiplier);
-                this.broadcast("feed_notification", {
-                    message: `⚡ Sultan menetapkan Multiplier Upeti ${this.state.scoreMultiplier}x!`,
-                });
+                this.broadcast("feed_notification", { message: `⚡ Sultan menetapkan Multiplier Upeti ${this.state.scoreMultiplier}x!` });
             }
         });
-        // 4. Handling "add_bots"
         this.onMessage("add_bots", (client) => {
-            if (client.sessionId === this.state.gameMasterSessionId) {
+            if (client.sessionId === this.state.gameMasterSessionId)
                 this.addSimulatedBots(5);
-            }
         });
-        // 5. Handling "force_finish"
         this.onMessage("force_finish", (client) => {
-            if (client.sessionId === this.state.gameMasterSessionId) {
+            if (client.sessionId === this.state.gameMasterSessionId)
                 this.finishMatch();
-            }
         });
-        // 6. Handling "admin_action"
+        // ── admin_action ───────────────────────────────────────────────────────
         this.onMessage("admin_action", (client, data) => {
             if (client.sessionId !== this.state.gameMasterSessionId) {
                 client.send("error", { message: "Aksi hanya diizinkan untuk Game Master" });
                 return;
             }
             switch (data.action) {
+                case "set_game_mode": {
+                    if (this.state.status !== "LOBBY")
+                        return;
+                    if (data.gameMode === "fast_building" || data.gameMode === "question_building") {
+                        this.state.gameMode = data.gameMode;
+                        this.broadcast("feed_notification", {
+                            message: data.gameMode === "fast_building"
+                                ? "⚡ Mode: Fast Building (Susun balok secepat mungkin!)"
+                                : "🧠 Mode: Question Building (Jawab pertanyaan dulu!)",
+                        });
+                    }
+                    break;
+                }
                 case "start_game": {
                     if (this.state.status === "PLAYING")
                         return;
+                    if (this.state.gameMode === "question_building" && this.customQuestions.length === 0) {
+                        client.send("action_rejected", { reason: "Buat dan simpan minimal satu soal sebelum memulai Question Building." });
+                        return;
+                    }
                     this.state.status = "PLAYING";
                     this.state.isPaused = false;
-                    this.state.timeRemaining = 180;
+                    const duration = data.durationSeconds || 180;
+                    this.state.timeRemaining = duration;
+                    // Inisialisasi question queue untuk semua player saat game mulai
+                    if (this.state.gameMode === "question_building") {
+                        this.state.players.forEach((p, sId) => {
+                            if (!sId.startsWith("bot_")) {
+                                p.canPlaceBlock = false; // mulai dengan pertanyaan dulu
+                                p.currentQuestionIdx = 0;
+                                this.playerQuestions.set(sId, shuffleQuestions(this.customQuestions));
+                            }
+                        });
+                        // Kirim pertanyaan pertama ke semua player
+                        this.clients.forEach((c) => {
+                            const p = this.state.players.get(c.sessionId);
+                            if (p && p.role !== "GAME_MASTER") {
+                                this.sendNextQuestion(c, p);
+                            }
+                        });
+                    }
                     this.gameTimer?.clear();
                     this.gameTimer = this.clock.setInterval(() => {
                         if (!this.state.isPaused && this.state.status === "PLAYING") {
                             this.state.timeRemaining -= 1;
-                            if (this.state.timeRemaining <= 0) {
+                            if (this.state.timeRemaining <= 0)
                                 this.finishMatch();
-                            }
                         }
                     }, 1000);
                     this.startBotSimulation();
-                    this.broadcast("match_started", { timeRemaining: 180 });
+                    this.broadcast("match_started", { timeRemaining: duration, gameMode: this.state.gameMode });
                     break;
                 }
                 case "pause_game": {
@@ -227,15 +345,33 @@ class TowerRoom extends colyseus_1.Room {
                                 ? `Game Master membekukan ${target.nickname}!`
                                 : `Game Master melepas pembekuan ${target.nickname}.`,
                         });
+                        if (target.isFrozen) {
+                            this.clock.setTimeout(() => { if (target.isFrozen && Date.now() >= target.frozenUntil)
+                                target.isFrozen = false; }, 10000);
+                        }
                     }
                     break;
                 }
                 case "set_multiplier": {
                     if (data.multiplier && data.multiplier > 0) {
                         this.state.scoreMultiplier = Number(data.multiplier);
-                        this.broadcast("feed_notification", {
-                            message: `⚡ Multiplier Upeti diatur ke ${this.state.scoreMultiplier}x!`,
-                        });
+                        this.broadcast("feed_notification", { message: `⚡ Multiplier Upeti diatur ke ${this.state.scoreMultiplier}x!` });
+                    }
+                    break;
+                }
+                case "kick_player": {
+                    if (!data.targetSessionId)
+                        return;
+                    const tc = this.clients.find(c => c.sessionId === data.targetSessionId);
+                    const tp = this.state.players.get(data.targetSessionId);
+                    if (tc && tp) {
+                        tc.send("kicked_notification", { message: "Anda telah dikeluarkan oleh Game Master." });
+                        this.broadcast("feed_notification", { message: `🚪 ${tp.nickname} telah dikeluarkan dari ruangan.` });
+                        tc.leave(4000, "Kicked by Game Master");
+                    }
+                    else if (tp?.sessionId.startsWith("bot_")) {
+                        this.state.players.delete(data.targetSessionId);
+                        this.broadcast("feed_notification", { message: `🚪 Bot ${tp.nickname} telah dikeluarkan.` });
                     }
                     break;
                 }
@@ -250,27 +386,32 @@ class TowerRoom extends colyseus_1.Room {
                 case "reset_match": {
                     this.gameTimer?.clear();
                     this.botTimer?.clear();
+                    this.playerQuestions.clear();
+                    this.playerLastAnswerCorrect.clear();
+                    this.blockScoreLedger.clear();
                     this.state.status = "LOBBY";
                     this.state.timeRemaining = 180;
                     this.state.scoreMultiplier = 1.0;
                     this.state.isPaused = false;
                     this.state.totalBlocksPlaced = 0;
                     this.state.winnerSessionId = "";
+                    // Pertahankan gameMode yang sudah dipilih sultan
                     this.state.players.forEach((p) => {
                         p.score = 0;
                         p.towerHeight = 0;
                         p.combo = 0;
                         p.isAlive = true;
                         p.isFrozen = false;
-                        p.doubleFundsUntil = 0;
-                        p.hasAutoCrane = false;
+                        p.budgetBlocksRemaining = 0;
+                        p.hasBLT = false;
+                        p.canPlaceBlock = true;
+                        p.currentQuestionIdx = 0;
                     });
                     this.broadcast("match_reset");
                     break;
                 }
             }
         });
-        // Backward-compatibility handlers
         this.onMessage("start_game", (client) => {
             if (client.sessionId === this.state.gameMasterSessionId) {
                 this.broadcast("match_started");
@@ -279,36 +420,112 @@ class TowerRoom extends colyseus_1.Room {
             }
         });
     }
-    // Simulated AI Empu bots
-    addSimulatedBots(count = 5) {
-        const botTemplates = [
-            "Empu Gandring (AI)",
-            "Empu Supo (AI)",
-            "Ken Arok (AI)",
-            "Patih Gajah Mada (AI)",
-            "Arya Penangsang (AI)",
-            "Dyah Pitaloka (AI)",
-            "Prabu Brawijaya (AI)",
-        ];
-        let addedCount = 0;
-        for (let i = 0; i < count; i++) {
-            const name = botTemplates[i % botTemplates.length];
-            const botId = `bot_${Date.now()}_${i + 1}`;
-            if (this.state.players.size < 30) {
-                const bot = new GameState_1.PlayerState();
-                bot.id = botId;
-                bot.sessionId = botId;
-                bot.nickname = name;
-                bot.role = "PLAYER";
-                bot.isAlive = true;
-                bot.isReady = true;
-                this.state.players.set(botId, bot);
-                addedCount++;
+    // ── Kirim pertanyaan ke player ──────────────────────────────────────────
+    sendNextQuestion(client, player) {
+        let questions = this.playerQuestions.get(client.sessionId);
+        if (!questions) {
+            if (this.customQuestions.length === 0)
+                return;
+            questions = shuffleQuestions(this.customQuestions);
+            this.playerQuestions.set(client.sessionId, questions);
+        }
+        const idx = player.currentQuestionIdx % questions.length;
+        const question = questions[idx];
+        client.send("new_question", {
+            questionId: question.id,
+            text: question.text,
+            options: question.options,
+            category: question.category,
+            questionNumber: player.currentQuestionIdx + 1,
+        });
+    }
+    applySabotage(cardType, attacker, target, reflected = false) {
+        if (target.hasBLT && !reflected) {
+            target.hasBLT = false;
+            target.score += 200;
+            this.applySabotage(cardType, target, attacker, true);
+            this.broadcast("feed_notification", {
+                message: `🛡️ BLT memantulkan sabotase ${attacker.nickname} kepada dirinya sendiri; ${target.nickname} menerima 200 poin!`,
+            });
+            return;
+        }
+        switch (cardType) {
+            case "CORRUPTION": {
+                const stolenPoints = Math.min(target.score, Math.max(100, Math.round(target.score * 0.25)));
+                target.score -= stolenPoints;
+                attacker.score += stolenPoints;
+                this.broadcast("feed_notification", { message: `💸 ${attacker.nickname} mengambil ${stolenPoints} poin dari ${target.nickname}!` });
+                break;
+            }
+            case "STALLED_PROJECT": {
+                const now = Date.now();
+                target.isFrozen = true;
+                target.frozenUntil = now + 5000;
+                this.clients.find((client) => client.sessionId === target.sessionId)?.send("frozen_notification", { durationMs: 5000 });
+                this.broadcast("feed_notification", { message: `⏸️ Proyek ${target.nickname} mangkrak selama 5 detik!` });
+                this.clock.setTimeout(() => {
+                    if (target.isFrozen && Date.now() >= target.frozenUntil)
+                        target.isFrozen = false;
+                }, 5000);
+                break;
+            }
+            case "BUILDING_EVICTION": {
+                const targetBlocks = this.blockScoreLedger.get(target.sessionId) ?? [];
+                const blocksStolen = Math.min(2, target.towerHeight);
+                const stolenScores = targetBlocks.splice(Math.max(0, targetBlocks.length - blocksStolen), blocksStolen);
+                const stolenPoints = Math.min(target.score, stolenScores.reduce((sum, score) => sum + score, 0));
+                target.towerHeight = Math.max(0, target.towerHeight - blocksStolen);
+                target.score = Math.max(0, target.score - stolenPoints);
+                attacker.score += stolenPoints;
+                this.clients.find((client) => client.sessionId === target.sessionId)?.send("tower_blocks_removed", { height: target.towerHeight });
+                this.broadcast("feed_notification", {
+                    message: `🚧 ${attacker.nickname} menertibkan ${blocksStolen} blok ${target.nickname} dan mengambil ${stolenPoints} poin!`,
+                });
+                break;
             }
         }
-        this.broadcast("feed_notification", {
-            message: `🤖 ${addedCount} Empu Binaan Kerajaan (AI) telah masuk ke Arena Sayembara!`,
+    }
+    sendCardChoice(client, height) {
+        const buffs = [
+            { type: "BUDGET_EFFICIENCY", category: "BUFF", name: "Efisiensi Anggaran", description: "Poin dari 3 blok berikutnya menjadi 2x." },
+            { type: "LIQUID_BUDGET", category: "BUFF", name: "Anggaran Cair", description: "Dua blok gratis otomatis tersusun dengan presisi sempurna." },
+            { type: "BLT", category: "BUFF", name: "BLT (Balasan Langsung Tuntas)", description: "Pantulkan sabotase berikutnya dan dapatkan 200 poin." },
+        ];
+        const sabotages = [
+            { type: "CORRUPTION", category: "SABOTASE", name: "Korupsi", description: "Ambil 25% poin lawan (minimal 100 poin)." },
+            { type: "STALLED_PROJECT", category: "SABOTASE", name: "Proyek Mangkrak", description: "Bekukan lawan selama 5 detik." },
+            { type: "BUILDING_EVICTION", category: "SABOTASE", name: "Bangunan Ditertibkan", description: "Curi hingga 2 blok teratas beserta poin bloknya." },
+        ];
+        const randomCard = (cards) => cards[Math.floor(Math.random() * cards.length)];
+        client.send("trigger_card_choice", {
+            height,
+            options: [randomCard(buffs), randomCard(sabotages)],
         });
+    }
+    // ── Bots ────────────────────────────────────────────────────────────────
+    addSimulatedBots(count = 5) {
+        const botTemplates = [
+            "Empu Gandring (AI)", "Empu Supo (AI)", "Ken Arok (AI)",
+            "Patih Gajah Mada (AI)", "Arya Penangsang (AI)",
+            "Dyah Pitaloka (AI)", "Prabu Brawijaya (AI)",
+        ];
+        let added = 0;
+        for (let i = 0; i < count; i++) {
+            if (this.state.players.size >= 30)
+                break;
+            const botId = `bot_${Date.now()}_${i + 1}`;
+            const bot = new GameState_1.PlayerState();
+            bot.id = botId;
+            bot.sessionId = botId;
+            bot.nickname = botTemplates[i % botTemplates.length];
+            bot.role = "PLAYER";
+            bot.isAlive = true;
+            bot.isReady = true;
+            bot.canPlaceBlock = true;
+            this.state.players.set(botId, bot);
+            added++;
+        }
+        this.broadcast("feed_notification", { message: `🤖 ${added} Empu Binaan Kerajaan (AI) masuk ke Arena!` });
     }
     startBotSimulation() {
         this.botTimer?.clear();
@@ -319,28 +536,21 @@ class TowerRoom extends colyseus_1.Room {
             this.state.players.forEach((player, sId) => {
                 if (!sId.startsWith("bot_") || !player.isAlive)
                     return;
-                // Skip if frozen
                 if (player.isFrozen) {
-                    if (now >= player.frozenUntil) {
+                    if (now >= player.frozenUntil)
                         player.isFrozen = false;
-                    }
-                    else {
+                    else
                         return;
-                    }
                 }
-                // 75% probability each tick
                 if (Math.random() < 0.75) {
                     const rand = Math.random();
-                    const isPerfect = rand > 0.45;
-                    const isCollapse = player.towerHeight > 20 && rand < 0.04;
-                    if (isCollapse) {
+                    if (player.towerHeight > 20 && rand < 0.04) {
                         player.isAlive = false;
-                        this.broadcast("feed_notification", {
-                            message: `💥 Candi milik ${player.nickname} runtuh pada tingkat ${player.towerHeight}!`,
-                        });
+                        this.broadcast("feed_notification", { message: `💥 Candi milik ${player.nickname} runtuh pada tingkat ${player.towerHeight}!` });
                         return;
                     }
                     player.towerHeight += 1;
+                    const isPerfect = rand > 0.45;
                     if (isPerfect) {
                         player.combo += 1;
                     }
@@ -348,95 +558,89 @@ class TowerRoom extends colyseus_1.Room {
                         player.combo = 0;
                     }
                     let multiplier = this.state.scoreMultiplier;
-                    if (now < player.doubleFundsUntil)
-                        multiplier *= 2.0;
-                    const basePoints = 100;
-                    const comboBonus = player.combo * 50;
-                    player.score += Math.round((basePoints + comboBonus) * multiplier);
+                    if (player.budgetBlocksRemaining > 0) {
+                        multiplier *= 2;
+                        player.budgetBlocksRemaining -= 1;
+                    }
+                    const pointsEarned = Math.round((100 + player.combo * 50) * multiplier);
+                    player.score += pointsEarned;
+                    const blockScores = this.blockScoreLedger.get(player.sessionId) ?? [];
+                    blockScores.push(pointsEarned);
+                    this.blockScoreLedger.set(player.sessionId, blockScores);
                     this.state.totalBlocksPlaced += 1;
                     this.broadcast("block_event", {
-                        sessionId: player.sessionId,
-                        nickname: player.nickname,
-                        height: player.towerHeight,
-                        score: player.score,
-                        combo: player.combo,
-                        perfect: isPerfect,
-                        isAlive: player.isAlive,
+                        sessionId: player.sessionId, nickname: player.nickname,
+                        height: player.towerHeight, score: player.score,
+                        combo: player.combo, perfect: isPerfect, isAlive: player.isAlive,
                     });
                 }
             });
         }, 2500);
     }
     onJoin(client, options) {
-        // If client is first or requested host, assign GM if no GM set
         const isFirstPlayer = this.clients.length === 1;
         const isGameMaster = Boolean(options.isHost || (isFirstPlayer && !this.state.gameMasterSessionId));
-        // Enforce max 30 players (+1 GM)
-        if (!isGameMaster && this.clients.length > 31) {
-            throw new Error("Room penuh (Maksimal 30 Pemain + 1 Game Master)");
-        }
+        if (!isGameMaster && this.clients.length > 31)
+            throw new Error("Room penuh");
         const player = new GameState_1.PlayerState();
         player.id = client.id;
         player.sessionId = client.sessionId;
         player.nickname = options.nickname?.trim() || (isGameMaster ? "Sultan Keraton" : `Empu_${client.sessionId.slice(-4)}`);
         player.role = isGameMaster ? "GAME_MASTER" : "PLAYER";
-        if (isGameMaster) {
+        player.canPlaceBlock = true;
+        if (isGameMaster)
             this.state.gameMasterSessionId = client.sessionId;
-        }
         this.state.players.set(client.sessionId, player);
         console.log(`[TowerRoom ${this.state.roomCode}] ${player.role} Joined: ${player.nickname}`);
     }
-    onLeave(client, _consented) {
+    async onLeave(client, consented) {
         const player = this.state.players.get(client.sessionId);
         if (!player)
             return;
-        console.log(`[TowerRoom ${this.state.roomCode}] Left: ${player.nickname}`);
+        if (!consented) {
+            try {
+                await this.allowReconnection(client, 20);
+                return;
+            }
+            catch { /* reconnect expired */ }
+        }
         if (player.role === "GAME_MASTER") {
-            let candidateSessionId = "";
+            let candidate = "";
             this.state.players.forEach((p, sId) => {
-                if (sId !== client.sessionId && !sId.startsWith("bot_") && !candidateSessionId) {
-                    candidateSessionId = sId;
-                }
+                if (sId !== client.sessionId && !sId.startsWith("bot_") && !candidate)
+                    candidate = sId;
             });
-            if (candidateSessionId) {
-                const candidate = this.state.players.get(candidateSessionId);
-                if (candidate) {
-                    candidate.role = "GAME_MASTER";
-                    this.state.gameMasterSessionId = candidateSessionId;
+            if (candidate) {
+                const c = this.state.players.get(candidate);
+                if (c) {
+                    c.role = "GAME_MASTER";
+                    this.state.gameMasterSessionId = candidate;
                 }
             }
         }
+        this.playerQuestions.delete(client.sessionId);
+        this.playerLastAnswerCorrect.delete(client.sessionId);
         this.state.players.delete(client.sessionId);
     }
-    // Auto-Save Match ke Neon DB & trigger match_over
     async finishMatch() {
         this.gameTimer?.clear();
         this.botTimer?.clear();
         this.state.status = "FINISHED";
-        // Include all participants (players and playing GM)
         const allPlayers = Array.from(this.state.players.values());
-        let playersArr = allPlayers.filter((p) => p.towerHeight > 0 || p.score > 0 || p.role === "PLAYER");
-        if (playersArr.length === 0 && allPlayers.length > 0) {
+        let playersArr = allPlayers.filter(p => p.towerHeight > 0 || p.score > 0 || p.role === "PLAYER");
+        if (playersArr.length === 0 && allPlayers.length > 0)
             playersArr = [...allPlayers];
-        }
         playersArr.sort((a, b) => b.score - a.score || b.towerHeight - a.towerHeight);
         const winner = playersArr[0];
-        this.state.winnerSessionId = winner ? winner.sessionId : "";
-        // Broadcast match_over
+        this.state.winnerSessionId = winner?.sessionId || "";
         this.broadcast("match_over", {
             roomCode: this.state.roomCode,
             winnerSessionId: this.state.winnerSessionId,
-            winnerNickname: winner ? winner.nickname : "Tidak Ada",
-            winnerScore: winner ? winner.score : 0,
+            winnerNickname: winner?.nickname || "Tidak Ada",
+            winnerScore: winner?.score || 0,
             totalBlocks: this.state.totalBlocksPlaced,
-            rankings: playersArr.map((p, idx) => ({
-                rank: idx + 1,
-                nickname: p.nickname,
-                score: p.score,
-                towerHeight: p.towerHeight,
-            })),
+            rankings: playersArr.map((p, idx) => ({ rank: idx + 1, nickname: p.nickname, score: p.score, towerHeight: p.towerHeight })),
         });
-        // Auto-Save to Neon DB via Prisma with automatic retry
         try {
             let match;
             let participantData = [];
@@ -444,76 +648,43 @@ class TowerRoom extends colyseus_1.Room {
                 try {
                     const gmPlayer = this.state.players.get(this.state.gameMasterSessionId);
                     const hostUsername = gmPlayer?.nickname || "Sultan Keraton";
-                    const hostUser = await db_1.prisma.user.upsert({
-                        where: { username: hostUsername },
-                        update: {},
-                        create: { username: hostUsername },
-                    });
-                    // Dedup nicknames to avoid Prisma unique constraint conflicts on [matchId, nickname]
+                    const hostUser = await db_1.prisma.user.upsert({ where: { username: hostUsername }, update: {}, create: { username: hostUsername } });
                     const seenNames = new Set();
                     participantData = await Promise.all(playersArr.map(async (p, idx) => {
                         let uniqueNick = p.nickname;
-                        if (seenNames.has(uniqueNick)) {
+                        if (seenNames.has(uniqueNick))
                             uniqueNick = `${uniqueNick} #${idx + 1}`;
-                        }
                         seenNames.add(uniqueNick);
-                        const user = await db_1.prisma.user.upsert({
-                            where: { username: uniqueNick },
-                            update: {},
-                            create: { username: uniqueNick },
-                        });
-                        return {
-                            userId: user.id,
-                            nickname: uniqueNick,
-                            role: p.role === "GAME_MASTER" ? client_1.Role.GAME_MASTER : client_1.Role.PLAYER,
-                            score: p.score,
-                            towerHeight: p.towerHeight,
-                            rank: idx + 1,
-                        };
+                        const user = await db_1.prisma.user.upsert({ where: { username: uniqueNick }, update: {}, create: { username: uniqueNick } });
+                        return { userId: user.id, nickname: uniqueNick, role: p.role === "GAME_MASTER" ? client_1.Role.GAME_MASTER : client_1.Role.PLAYER, score: p.score, towerHeight: p.towerHeight, rank: idx + 1 };
                     }));
                     match = await db_1.prisma.match.create({
                         data: {
-                            roomCode: this.state.roomCode,
-                            status: "FINISHED",
-                            hostId: hostUser.id,
+                            roomCode: this.state.roomCode, status: "FINISHED", hostId: hostUser.id,
                             durationSeconds: Math.max(1, 180 - this.state.timeRemaining),
-                            participants: {
-                                create: participantData,
-                            },
+                            participants: { create: participantData },
                         },
                     });
-                    break; // Succeeded!
+                    break;
                 }
                 catch (retryErr) {
-                    console.warn(`[Prisma / Neon DB] Percobaan ${attempt}/3 gagal menyimpan match:`, retryErr?.message || retryErr);
                     if (attempt === 3)
                         throw retryErr;
-                    await new Promise((r) => setTimeout(r, 1200));
+                    await new Promise(r => setTimeout(r, 1200));
                 }
             }
-            console.log(`[Prisma / Neon DB] ✅ Match ${match.roomCode} tersimpan ke DB (ID: ${match.id})`);
-            this.broadcast("db_saved", {
-                matchId: match.id,
-                roomCode: match.roomCode,
-                participantCount: participantData.length,
-                savedAt: new Date().toISOString(),
-                winner: winner ? winner.nickname : "Tidak Ada",
-            });
-            this.broadcast("feed_notification", {
-                message: `💾 Hasil Sayembara #${match.roomCode} sukses tersimpan ke Database Neon PostgreSQL!`,
-            });
+            this.broadcast("db_saved", { matchId: match.id, roomCode: match.roomCode, participantCount: participantData.length, savedAt: new Date().toISOString(), winner: winner?.nickname || "Tidak Ada" });
+            this.broadcast("feed_notification", { message: `💾 Hasil Sayembara #${match.roomCode} sukses tersimpan!` });
         }
         catch (error) {
-            console.error("[Prisma / Neon DB] ❌ Gagal menyimpan data match:", error);
-            this.broadcast("feed_notification", {
-                message: "⚠️ Gagal menyimpan ke database Neon PostgreSQL. Periksa log server.",
-            });
+            console.error("[DB] Gagal menyimpan:", error);
+            this.broadcast("feed_notification", { message: "⚠️ Gagal menyimpan ke database. Periksa log server." });
         }
     }
     onDispose() {
         this.gameTimer?.clear();
         this.botTimer?.clear();
-        console.log(`[TowerRoom ${this.state.roomCode}] Room Disposed`);
+        console.log(`[TowerRoom ${this.state.roomCode}] Disposed`);
     }
 }
 exports.TowerRoom = TowerRoom;

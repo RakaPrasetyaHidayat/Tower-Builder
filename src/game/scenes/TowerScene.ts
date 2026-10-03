@@ -11,6 +11,7 @@ export interface DropBlockData {
 }
 
 export interface TowerSceneConfig {
+  initialHeight?: number;
   onDropBlock?: (data: DropBlockData) => void;
   onTowerCollapsed?: (data: { height: number; tiltSum: number }) => void;
   onBlockMissed?: () => void;
@@ -84,12 +85,23 @@ export class TowerScene extends Phaser.Scene {
   }
 
   init(data: TowerSceneConfig) {
-    this.configData = data;
-    this.currentHeight = 0;
+    // Selalu reset game state flags
     this.currentTiltSum = 0;
     this.isCollapsed = false;
     this.isDropping = false;
+    this.dropVy = 0;
+    this.dropVx = 0;
     this.landedBlocks = [];
+    this.swingingBlock = null;
+    this.isGameActive = true;  // SELALU true saat init
+    this.isPaused = false;
+    this.isFrozen = false;
+
+    // Update configData hanya jika ada data callback yang dipass
+    if (data && (data.onDropBlock || data.onTowerCollapsed || data.initialHeight !== undefined)) {
+      this.configData = data;
+      this.currentHeight = data.initialHeight ?? 0;
+    }
   }
 
   create() {
@@ -107,12 +119,27 @@ export class TowerScene extends Phaser.Scene {
     const base = this.createTowerFloor(this.anchorX, baseY, this.blockWidth + 24, this.blockHeight + 14, 0, true);
     this.landedBlocks.push({ container: base, x: this.anchorX, y: baseY, rotation: 0 });
 
+    // Restore blocks if reconnected mid-game
+    if (this.currentHeight > 0) {
+      for (let i = 1; i <= this.currentHeight; i++) {
+        const floorY = baseY - i * this.blockHeight;
+        const floor = this.createTowerFloor(this.anchorX, floorY, this.blockWidth, this.blockHeight, i % TOWER_FLOOR_THEMES.length, false);
+        this.landedBlocks.push({ container: floor, x: this.anchorX, y: floorY, rotation: 0 });
+      }
+      // Reposition anchor above the restored tower
+      this.anchorY = height * 0.22 - this.currentHeight * this.blockHeight;
+      const scrollY = Math.max(0, (this.currentHeight - 2.5) * this.blockHeight);
+      this.cameras.main.centerOn(this.scale.width / 2, (this.scale.height / 2) - scrollY);
+    }
+
     this.ropeGraphics = this.add.graphics();
 
     this.spawnSwingingBlock();
 
-    // Input: tap screen or space
+    // Input: tap screen or space — only register once
+    this.input.off("pointerdown");
     this.input.on("pointerdown", () => this.handleRelease());
+    this.input.keyboard?.off("keydown-SPACE");
     this.input.keyboard?.on("keydown-SPACE", (event: KeyboardEvent) => {
       if (event?.preventDefault) event.preventDefault();
       this.handleRelease();
@@ -125,11 +152,12 @@ export class TowerScene extends Phaser.Scene {
   }
 
   update(_time: number, delta: number) {
-    if (this.isCollapsed || this.isPaused || !this.isGameActive) return;
+    if (this.isCollapsed) return;
 
-    const dt = Math.min(delta / 1000, 0.05); // Cap dt to prevent spiral of death
+    const dt = Math.min(delta / 1000, 0.05);
 
-    // Swinging state
+    // Pendulum selalu bergerak (visual preview) kecuali saat beku
+    // Hanya drop yang dicegah saat paused/tidak aktif
     if (!this.isDropping && this.swingingBlock && !this.isFrozen) {
       this.swingTime += dt * this.pendulumOmega;
       this.pendulumAngle = Math.sin(this.swingTime) * this.pendulumThetaMax;
@@ -143,26 +171,23 @@ export class TowerScene extends Phaser.Scene {
       // Draw rope
       if (this.ropeGraphics) {
         this.ropeGraphics.clear();
-        // Rope fiber
         this.ropeGraphics.lineStyle(3, 0x5c2b08, 0.9);
         this.ropeGraphics.beginPath();
         this.ropeGraphics.moveTo(this.anchorX, this.anchorY);
         this.ropeGraphics.lineTo(bx, by - this.blockHeight / 2);
         this.ropeGraphics.strokePath();
-        // Highlight
         this.ropeGraphics.lineStyle(1.5, 0xd97706, 0.7);
         this.ropeGraphics.beginPath();
         this.ropeGraphics.moveTo(this.anchorX, this.anchorY);
         this.ropeGraphics.lineTo(bx, by - this.blockHeight / 2);
         this.ropeGraphics.strokePath();
-        // Hook
         this.ropeGraphics.fillStyle(0xf59e0b, 1);
         this.ropeGraphics.fillCircle(this.anchorX, this.anchorY, 4);
       }
     }
 
-    // Dropping physics
-    if (this.isDropping && this.swingingBlock) {
+    // Dropping physics — hanya berjalan saat game aktif dan tidak paused
+    if (this.isDropping && this.swingingBlock && this.isGameActive && !this.isPaused) {
       this.dropVy += 980 * dt;
       this.swingingBlock.y += this.dropVy * dt;
       this.swingingBlock.x += this.dropVx * dt;
@@ -171,6 +196,7 @@ export class TowerScene extends Phaser.Scene {
       const targetY = top.y - this.blockHeight;
 
       if (this.swingingBlock.y >= targetY) {
+        this.swingingBlock.y = targetY;
         this.processLanding(top);
       }
     }
@@ -181,7 +207,9 @@ export class TowerScene extends Phaser.Scene {
   }
 
   private handleRelease() {
-    if (!this.isGameActive || this.isDropping || this.isCollapsed || this.isPaused || this.isFrozen) return;
+    // Izinkan drop hanya saat game aktif dan tidak paused/frozen
+    if (this.isDropping || this.isCollapsed || this.isFrozen || !this.swingingBlock) return;
+    if (!this.isGameActive || this.isPaused) return;
 
     try { navigator?.vibrate?.(25); } catch (_) { /* noop */ }
 
@@ -190,7 +218,7 @@ export class TowerScene extends Phaser.Scene {
 
     const tangent = Math.cos(this.swingTime) * this.pendulumThetaMax * this.pendulumOmega * 48;
     this.dropVx = tangent;
-    this.dropVy = 75;
+    this.dropVy = 80;
   }
 
   private processLanding(topBlock: { container: Phaser.GameObjects.Container; x: number; y: number; rotation: number }) {
@@ -200,16 +228,15 @@ export class TowerScene extends Phaser.Scene {
     const diff = bx - topBlock.x;
     const maxDiff = (this.blockWidth / 2) + 26;
 
-    // Miss
+    // Miss: block fell completely off the side
     if (Math.abs(diff) > maxDiff) {
       this.handleMiss();
       return;
     }
 
-    // Land
+    // Land — block is already snapped to targetY by the update loop
     this.isDropping = false;
     const landY = topBlock.y - this.blockHeight;
-    this.swingingBlock.setPosition(bx, landY);
 
     const ratio = Math.max(-1, Math.min(1, diff / (this.blockWidth / 2)));
     const precision = Math.max(0, Math.round(100 - Math.abs(ratio) * 100));
@@ -218,7 +245,21 @@ export class TowerScene extends Phaser.Scene {
     const tilt = perfect ? 0 : ratio * 5.2;
     this.currentTiltSum += tilt;
 
-    this.swingingBlock.setRotation(Phaser.Math.DegToRad(this.currentTiltSum));
+    // Clamp tilt sum display
+    const clampedTilt = Math.max(-this.MAX_TILT, Math.min(this.MAX_TILT, this.currentTiltSum));
+    this.swingingBlock.setRotation(Phaser.Math.DegToRad(clampedTilt));
+
+    // Small bounce tween to make landing feel physical
+    this.tweens.add({
+      targets: this.swingingBlock,
+      y: landY - 4,
+      duration: 55,
+      ease: "Sine.easeOut",
+      yoyo: true,
+      onComplete: () => {
+        this.swingingBlock?.setPosition(bx, landY);
+      },
+    });
 
     this.createDustPuff(bx, landY + this.blockHeight / 2);
 
@@ -226,8 +267,10 @@ export class TowerScene extends Phaser.Scene {
       container: this.swingingBlock,
       x: bx,
       y: landY,
-      rotation: Phaser.Math.DegToRad(this.currentTiltSum),
+      rotation: Phaser.Math.DegToRad(clampedTilt),
     });
+
+    this.swingingBlock = null;
 
     this.currentHeight += 1;
 

@@ -31,26 +31,26 @@ function generateClientRoomCode(): string {
 
 export async function createGameRoom(nickname: string): Promise<Room<any>> {
   const roomCode = generateClientRoomCode();
-  const roomPromise = colyseusClient.create("tower_room", {
+  return colyseusClient.create("tower_room", {
     isHost: true,
     nickname: nickname.trim(),
     roomCode,
   });
+}
 
-  return Promise.race([
-    roomPromise,
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new Error(
-              "Gagal membuat room: Koneksi timeout ke Server Colyseus (ws://localhost:2567). Pastikan server backend berjalan di port 2567."
-            )
-          ),
-        6000
-      )
-    ),
-  ]);
+/**
+ * Cari roomId dari server berdasarkan roomCode, lalu join by ID.
+ * Ini memastikan tidak ada room baru yang dibuat secara tidak sengaja.
+ */
+async function findRoomId(roomCode: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${getApiBaseUrl()}/api/room/${roomCode.toUpperCase()}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return data.roomId || null;
+  } catch {
+    return null;
+  }
 }
 
 export async function joinGameRoom(
@@ -58,26 +58,25 @@ export async function joinGameRoom(
   nickname: string
 ): Promise<Room<any>> {
   const cleanCode = roomCode.trim().toUpperCase();
-  const roomPromise = colyseusClient.joinOrCreate("tower_room", {
+
+  // Cari roomId dulu via REST — ini tidak membuat room baru
+  const roomId = await findRoomId(cleanCode);
+
+  if (roomId) {
+    // Join langsung ke room yang ada berdasarkan ID
+    return colyseusClient.joinById(roomId, {
+      roomCode: cleanCode,
+      isHost: false,
+      nickname: nickname.trim(),
+    });
+  }
+
+  // Fallback: joinOrCreate (hanya dipakai kalau API room tidak bisa dicapai)
+  return colyseusClient.joinOrCreate("tower_room", {
     roomCode: cleanCode,
     isHost: false,
     nickname: nickname.trim(),
   });
-
-  return Promise.race([
-    roomPromise,
-    new Promise<never>((_, reject) =>
-      setTimeout(
-        () =>
-          reject(
-            new Error(
-              `Kode Room #${cleanCode} tidak ditemukan atau server Colyseus tidak merespon.`
-            )
-          ),
-        6000
-      )
-    ),
-  ]);
 }
 
 export async function reconnectGameRoom(

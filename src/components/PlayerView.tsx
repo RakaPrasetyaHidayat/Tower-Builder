@@ -1,21 +1,11 @@
 import React, { useState, useRef } from "react";
-import type { GameStateData, BlockPlacePayload } from "../types/game";
+import type { GameStateData, BlockPlacePayload, Question, QuestionResult } from "../types/game";
 import { PhaserTowerGame, type PhaserTowerGameHandle } from "./PhaserTowerGame";
 import type { DropBlockData } from "../game/scenes/TowerScene";
+import { QuestionOverlay } from "./QuestionOverlay";
 import {
-  Clock,
-  Trophy,
-  Flame,
-  Snowflake,
-  LogOut,
-  Landmark,
-  Coins,
-  Hammer,
-  Play,
-  Crown,
-  Bot,
-  LayoutDashboard,
-  Zap,
+  Clock, Trophy, Flame, Snowflake, LogOut, Landmark, Coins, Hammer,
+  Play, Crown, Bot, LayoutDashboard, Zap,
 } from "lucide-react";
 
 interface PlayerViewProps {
@@ -24,13 +14,16 @@ interface PlayerViewProps {
   isGameMaster?: boolean;
   onPlaceBlock: (payload: BlockPlacePayload) => void;
   onLeave: () => void;
-  onStart?: () => void;
+  onStart?: (durationSeconds?: number) => void;
   onPause?: () => void;
   onResume?: () => void;
   onSetMultiplier?: (multiplier: number) => void;
   onForceFinish?: () => void;
   onAddBots?: () => void;
   onSwitchToDashboard?: () => void;
+  currentQuestion?: Question | null;
+  questionResult?: QuestionResult | null;
+  onAnswerQuestion?: (questionId: number, answerIndex: number) => void;
 }
 
 export const PlayerView: React.FC<PlayerViewProps> = ({
@@ -46,6 +39,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   onForceFinish: _onForceFinish,
   onAddBots,
   onSwitchToDashboard,
+  currentQuestion,
+  questionResult,
+  onAnswerQuestion,
 }) => {
   const [currentTilt, setCurrentTilt] = useState(0);
   const gameRef = useRef<PhaserTowerGameHandle | null>(null);
@@ -69,6 +65,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const isLobby = state.status === "LOBBY";
   const isFinished = state.status === "FINISHED";
   const isFrozen = Boolean(myPlayer?.isFrozen);
+  const isQuestionMode = state.gameMode === "question_building";
+  // Boleh tap drop hanya jika: bukan question mode, ATAU question mode dan canPlaceBlock=true
+  const canDrop = !isQuestionMode || Boolean(myPlayer?.canPlaceBlock);
 
   const handleDropBlock = (data: DropBlockData) => {
     setCurrentTilt(data.tiltSum);
@@ -103,14 +102,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === "Space") {
         e.preventDefault();
-        if (isPlaying && !isPaused && !isFrozen) {
+        if (isPlaying && !isPaused && !isFrozen && canDrop) {
           triggerMobileDrop();
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isPlaying, isPaused, isFrozen]);
+  }, [isPlaying, isPaused, isFrozen, canDrop]);
 
   const lastDropRef = useRef(0);
   const handleTapDrop = (e: React.SyntheticEvent) => {
@@ -124,7 +123,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     if (e.currentTarget instanceof HTMLElement) {
       e.currentTarget.blur();
     }
-    if (isPlaying && !isPaused && !isFrozen) {
+    if (isPlaying && !isPaused && !isFrozen && canDrop) {
       triggerMobileDrop();
     }
   };
@@ -151,12 +150,32 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           isPlaying={isPlaying}
           isPaused={isPaused}
           isFrozen={isFrozen}
+          initialHeight={myPlayer?.towerHeight || 0}
           onDropBlock={handleDropBlock}
           onTowerCollapsed={handleTowerCollapsed}
         />
       </div>
 
       {/* ═══════ FLOATING HUD OVERLAYS ═══════ */}
+
+      {/* Central Status Alerts */}
+      <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none">
+        {isFrozen && (
+          <div className="px-6 py-3 rounded-3xl bg-cyan-950/80 backdrop-blur-md border-2 border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.5)] flex items-center gap-3 animate-pulse">
+            <Snowflake className="w-8 h-8 text-cyan-300 animate-spin" style={{ animationDuration: "3s" }} />
+            <div className="text-center">
+              <div className="text-cyan-100 font-black text-xl tracking-widest uppercase">Tersabotase!</div>
+              <div className="text-cyan-300/80 text-[10px] font-bold">KUTUKAN ARCA BEKU</div>
+            </div>
+          </div>
+        )}
+        {myPlayer?.hasAutoCrane && (
+          <div className="px-4 py-2 rounded-2xl bg-emerald-950/80 backdrop-blur-md border border-emerald-400/50 shadow-[0_0_20px_rgba(52,211,153,0.3)] flex items-center gap-2">
+            <Hammer className="w-5 h-5 text-emerald-400 animate-bounce" />
+            <span className="text-emerald-100 font-black text-sm uppercase">Auto-Crane Aktif</span>
+          </div>
+        )}
+      </div>
 
       {/* Top-Left: Score & Timer Pill */}
       <div className="absolute top-3 left-3 z-30 flex flex-col gap-2">
@@ -316,8 +335,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       )}
 
-      {/* Bottom: Tap-to-Drop Zone */}
-      {isPlaying && !isPaused && !isFrozen && (
+      {/* Bottom: Tap-to-Drop Zone — hanya tampil jika boleh drop */}
+      {isPlaying && !isPaused && !isFrozen && canDrop && (
         <div className="absolute bottom-0 left-0 right-0 z-30 p-3">
           <button
             type="button"
@@ -329,6 +348,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
             <span>KETUK UNTUK MENARUH BALOK</span>
           </button>
         </div>
+      )}
+
+      {/* Question Building overlay — tampil di atas game canvas */}
+      {isPlaying && !isPaused && isQuestionMode && onAnswerQuestion && (
+        <QuestionOverlay
+          question={currentQuestion ?? null}
+          result={questionResult ?? null}
+          canPlaceBlock={canDrop}
+          onAnswer={onAnswerQuestion}
+        />
       )}
 
       {/* GM Controls (small floating pills) */}

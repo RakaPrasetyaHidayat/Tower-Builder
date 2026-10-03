@@ -1,36 +1,55 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import type { Room } from "colyseus.js";
 import { createGameRoom, joinGameRoom, reconnectGameRoom } from "./services/colyseus";
-import type { GameStateData, BlockPlacePayload, CardOption, CardType, DbSavedPayload } from "./types/game";
+import type { GameStateData, BlockPlacePayload, CardOption, CardType, DbSavedPayload, GameMode, Question, QuestionResult } from "./types/game";
 import { Lobby } from "./components/Lobby";
 import { AdminDashboard } from "./components/AdminDashboard";
 import { PlayerView } from "./components/PlayerView";
 import { CardChoiceModal } from "./components/CardChoiceModal";
 import { MatchSummaryModal } from "./components/Leaderboard";
 
+// Cek apakah ada session tersimpan sebelum render pertama
+// Cek sessionStorage DAN URL ?room= param
+function hasSavedSession(): boolean {
+  const hasStorage = !!(
+    sessionStorage.getItem("tb_room_code") &&
+    sessionStorage.getItem("tb_nickname")
+  );
+  // Kalau ada ?room= di URL dan ada nickname tersimpan, juga perlu loading
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlRoom = urlParams.get("room");
+  const hasUrlRoom = !!(urlRoom && sessionStorage.getItem("tb_nickname"));
+  return hasStorage || hasUrlRoom;
+}
+
 export function App() {
   const [room, setRoom] = useState<Room<any> | null>(null);
   const [gameState, setGameState] = useState<GameStateData | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
+  // Mulai dengan isLoading=true jika ada session tersimpan, agar Lobby tidak flash
+  const [isLoading, setIsLoading] = useState<boolean>(hasSavedSession());
   const [error, setError] = useState<string | null>(null);
 
-  // Round key to trigger game canvas reset on new round
   const [roundId, setRoundId] = useState<number>(1);
-  // Card Choice modal state
   const [cardChoices, setCardChoices] = useState<CardOption[] | null>(null);
-  // Match Summary modal visible flag
   const [showSummary, setShowSummary] = useState<boolean>(false);
-  // Toast notifications feed
   const [feedNotification, setFeedNotification] = useState<string | null>(null);
-  // Neon DB match saved info
   const [dbSavedInfo, setDbSavedInfo] = useState<DbSavedPayload | null>(null);
-  // Game Master View Mode: "play" (playable arena with Sultan HUD) or "dashboard" (full GM spectator deck)
-  const [gmViewMode, setGmViewMode] = useState<"play" | "dashboard">("play");
+  const [gmViewMode, setGmViewMode] = useState<"play" | "dashboard">("dashboard");
+
+  // Question Building state
+  const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
+  const [questionResult, setQuestionResult] = useState<QuestionResult | null>(null);
+
+  // Ref ke room aktif — dipakai di cleanup tanpa menyebabkan re-render
+  const roomRef = useRef<Room<any> | null>(null);
+  // Flag agar onLeave tidak clear state saat kita sendiri yang keluar
+  const isLeavingRef = useRef(false);
 
   const setupRoomListeners = useCallback((activeRoom: Room<any>) => {
     const syncState = (state: any) => {
       if (!state) return;
 
+      // Selalu simpan roomCode ke sessionStorage setiap ada update
       if (state.roomCode) {
         sessionStorage.setItem("tb_room_code", state.roomCode);
       }
@@ -95,55 +114,66 @@ export function App() {
         isPaused: Boolean(state.isPaused),
         totalBlocksPlaced: state.totalBlocksPlaced ?? 0,
         winnerSessionId: state.winnerSessionId || "",
+        gameMode: (state.gameMode as GameMode) || "fast_building",
         players: playersObj,
       });
     };
 
-    activeRoom.onStateChange((state) => {
-      syncState(state);
-    });
-    if (activeRoom.state) {
-      syncState(activeRoom.state);
-    }
+    activeRoom.onStateChange(syncState);
+    // Sync state awal yang sudah ada
+    if (activeRoom.state) syncState(activeRoom.state);
 
-    // Milestone card choice event
     activeRoom.onMessage("trigger_card_choice", (data: { options: CardOption[] }) => {
       setCardChoices(data.options);
     });
-
-    // Sabotage / Feed notification event
     activeRoom.onMessage("feed_notification", (data: { message: string }) => {
       setFeedNotification(data.message);
       setTimeout(() => setFeedNotification(null), 4000);
     });
-
-    // Neon DB save broadcast
     activeRoom.onMessage("db_saved", (data: DbSavedPayload) => {
       setDbSavedInfo(data);
       setFeedNotification(`💾 Match #${data.roomCode} sukses tersimpan ke Database Neon PostgreSQL!`);
       setTimeout(() => setFeedNotification(null), 5000);
     });
-
-    activeRoom.onMessage("match_over", () => {
-      setShowSummary(true);
-    });
-
+    activeRoom.onMessage("match_over", () => setShowSummary(true));
     activeRoom.onMessage("match_reset", () => {
       setShowSummary(false);
       setCardChoices(null);
       setDbSavedInfo(null);
       setRoundId((prev) => prev + 1);
     });
-
     activeRoom.onMessage("action_rejected", (data: { reason: string }) => {
       setFeedNotification(data.reason);
       setTimeout(() => setFeedNotification(null), 3000);
     });
 
+    // Question Building messages
+    activeRoom.onMessage("new_question", (data: Question) => {
+      setQuestionResult(null);
+      setCurrentQuestion(data);
+    });
+
+    activeRoom.onMessage("question_result", (data: QuestionResult) => {
+      setQuestionResult(data);
+      if (data.correct) {
+        // Soal berikutnya datang setelah blok ditempatkan (dari server)
+        // Hapus soal agar tombol tap-drop muncul
+        setCurrentQuestion(null);
+      }
+      // Jika salah, soal baru akan datang setelah 3 detik (dari server)
+      if (!data.correct) {
+        setTimeout(() => setQuestionResult(null), 3000);
+      }
+    });
+
+    // Koneksi putus dari luar (bukan karena kita yang keluar)
     activeRoom.onLeave(() => {
+      if (isLeavingRef.current) return;
       sessionStorage.removeItem("tb_room_code");
       sessionStorage.removeItem("tb_nickname");
       sessionStorage.removeItem("tb_reconnect_token");
+      sessionStorage.removeItem("tb_role");
+      roomRef.current = null;
       setRoom(null);
       setGameState(null);
       setIsLoading(false);
@@ -158,92 +188,173 @@ export function App() {
     });
   }, []);
 
-  // Auto-reconnect / stay in room on F5 page refresh
+  // ── Reconnect saat refresh ──────────────────────────────────────────────
   useEffect(() => {
-    const savedRoomCode = sessionStorage.getItem("tb_room_code");
+    // Baca juga dari URL query param ?room=XXXX (untuk kasus join via link)
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlRoomCode = urlParams.get("room")?.toUpperCase() || null;
+
+    const savedRoomCode = sessionStorage.getItem("tb_room_code") || urlRoomCode;
     const savedNickname = sessionStorage.getItem("tb_nickname");
     const savedToken = sessionStorage.getItem("tb_reconnect_token");
+    const savedRole = sessionStorage.getItem("tb_role");
 
-    if (savedRoomCode && savedNickname && !room) {
-      setIsLoading(true);
-      const restoreSession = async () => {
-        try {
-          let activeRoom: Room<any> | null = null;
-          if (savedToken) {
-            try {
-              activeRoom = await reconnectGameRoom(savedToken);
-            } catch (_) {
-              // Token reconnect failed, fallback to joinOrCreate
-            }
+    // Tidak ada session sama sekali → tidak perlu reconnect, tampilkan lobby
+    if (!savedRoomCode || !savedNickname) {
+      setIsLoading(false);
+      return;
+    }
+
+    // Sudah ada room aktif → skip
+    if (roomRef.current) return;
+
+    let cancelled = false;
+
+    const restoreSession = async () => {
+      try {
+        let activeRoom: Room<any> | null = null;
+
+        // 1. Coba reconnect pakai token (restore session persis yang sama)
+        if (savedToken) {
+          try {
+            activeRoom = await reconnectGameRoom(savedToken);
+          } catch {
+            // Token expired/invalid → lanjut fallback
           }
-          if (!activeRoom) {
+        }
+
+        // 2. Fallback: join room yang ada via roomId (tidak buat room baru)
+        if (!activeRoom) {
+          try {
             activeRoom = await joinGameRoom(savedRoomCode, savedNickname);
+          } catch {
+            activeRoom = null;
           }
-          sessionStorage.setItem("tb_reconnect_token", activeRoom.reconnectionToken || "");
-          setRoom(activeRoom);
-          setupRoomListeners(activeRoom);
-        } catch (_) {
+        }
+
+        if (cancelled) {
+          try { activeRoom?.leave(); } catch { /* noop */ }
+          return;
+        }
+
+        if (!activeRoom) {
+          // Tidak bisa reconnect sama sekali → bersihkan session dan tampilkan lobby
           sessionStorage.removeItem("tb_room_code");
           sessionStorage.removeItem("tb_nickname");
           sessionStorage.removeItem("tb_reconnect_token");
-        } finally {
+          sessionStorage.removeItem("tb_role");
           setIsLoading(false);
+          return;
         }
-      };
-      restoreSession();
-    }
-  }, [setupRoomListeners]);
 
+        // Simpan token baru
+        sessionStorage.setItem("tb_reconnect_token", activeRoom.reconnectionToken || "");
+
+        // Restore tampilan sesuai role
+        if (savedRole === "GAME_MASTER") {
+          setGmViewMode("dashboard");
+        } else {
+          setGmViewMode("play");
+        }
+
+        roomRef.current = activeRoom;
+        setRoom(activeRoom);
+        setupRoomListeners(activeRoom);
+      } catch {
+        if (!cancelled) {
+          sessionStorage.removeItem("tb_room_code");
+          sessionStorage.removeItem("tb_nickname");
+          sessionStorage.removeItem("tb_reconnect_token");
+          sessionStorage.removeItem("tb_role");
+        }
+      } finally {
+        if (!cancelled) setIsLoading(false);
+      }
+    };
+
+    restoreSession();
+
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // Hanya run sekali saat mount
+
+  // ── Create (GM) ──────────────────────────────────────────────────────────
   const handleCreate = async (nickname: string) => {
     setIsLoading(true);
     setError(null);
     try {
       const newRoom = await createGameRoom(nickname);
+
+      // Simpan SEMUA data yang dibutuhkan untuk reconnect SEBELUM setup listeners
+      // agar syncState pertama sudah punya nickname
       sessionStorage.setItem("tb_nickname", nickname);
       sessionStorage.setItem("tb_reconnect_token", newRoom.reconnectionToken || "");
+      sessionStorage.setItem("tb_role", "GAME_MASTER");
+
+      setGmViewMode("dashboard");
+      roomRef.current = newRoom;
       setRoom(newRoom);
       setupRoomListeners(newRoom);
+      // roomCode akan disimpan otomatis saat syncState pertama masuk dari server
     } catch (err: any) {
-      setError(err?.message || "Gagal membuat room Sultan. Pastikan server Colyseus berjalan.");
+      setError(err?.message || "Gagal membuat room. Pastikan server Colyseus berjalan di port 2567.");
     } finally {
       setIsLoading(false);
     }
   };
 
+  // ── Join (Player) ────────────────────────────────────────────────────────
   const handleJoin = async (roomCode: string, nickname: string) => {
     setIsLoading(true);
     setError(null);
     try {
       const joinedRoom = await joinGameRoom(roomCode, nickname);
-      sessionStorage.setItem("tb_room_code", roomCode);
+      sessionStorage.setItem("tb_room_code", roomCode.toUpperCase());
       sessionStorage.setItem("tb_nickname", nickname);
       sessionStorage.setItem("tb_reconnect_token", joinedRoom.reconnectionToken || "");
+      sessionStorage.setItem("tb_role", "PLAYER");
+      setGmViewMode("play");
+      roomRef.current = joinedRoom;
       setRoom(joinedRoom);
       setupRoomListeners(joinedRoom);
     } catch (err: any) {
-      setError(err?.message || "Gagal bergabung ke room. Pastikan kode room 6 digit benar.");
+      setError(err?.message || "Gagal bergabung. Pastikan kode room 6 digit benar.");
     } finally {
       setIsLoading(false);
     }
   };
 
+  // ── Leave ────────────────────────────────────────────────────────────────
   const handleLeave = () => {
+    isLeavingRef.current = true;
+
     sessionStorage.removeItem("tb_room_code");
     sessionStorage.removeItem("tb_nickname");
     sessionStorage.removeItem("tb_reconnect_token");
-    if (room) {
-      room.leave();
+    sessionStorage.removeItem("tb_role");
+
+    const currentRoom = roomRef.current;
+    roomRef.current = null;
+    if (currentRoom) {
+      try { currentRoom.leave(); } catch { /* noop */ }
     }
+
     setRoom(null);
     setGameState(null);
     setCardChoices(null);
     setShowSummary(false);
     setDbSavedInfo(null);
+    setError(null);
+    setGmViewMode("dashboard");
+    setCurrentQuestion(null);
+    setQuestionResult(null);
+
+    setTimeout(() => { isLeavingRef.current = false; }, 300);
   };
 
-  // Admin actions
-  const handleStart = () =>
-    room?.send("admin_action", { action: "start_game" });
+  // ── Admin actions ────────────────────────────────────────────────────────
+  const handleStart = (durationSeconds?: number) =>
+    room?.send("admin_action", { action: "start_game", durationSeconds: durationSeconds ?? 180 });
   const handlePause = () =>
     room?.send("admin_action", { action: "pause_game" });
   const handleResume = () =>
@@ -252,21 +363,25 @@ export function App() {
     setShowSummary(false);
     setCardChoices(null);
     setDbSavedInfo(null);
+    setCurrentQuestion(null);
+    setQuestionResult(null);
     setRoundId((prev) => prev + 1);
     room?.send("admin_action", { action: "reset_match" });
   };
-  const handleFreezePlayer = (targetSessionId: string) => {
+  const handleFreezePlayer = (targetSessionId: string) =>
     room?.send("admin_action", { action: "freeze_player", targetSessionId });
-  };
   const handleSetMultiplier = (multiplier: number) =>
     room?.send("set_multiplier", { multiplier });
-  const handleForceFinish = () =>
-    room?.send("force_finish");
-  const handleAddBots = () =>
-    room?.send("add_bots");
+  const handleForceFinish = () => room?.send("force_finish");
+  const handleAddBots = () => room?.send("add_bots");
 
-  // Player drop block
-  const handlePlaceBlock = (payload: BlockPlacePayload) => {
+  const handleSetGameMode = (mode: GameMode) =>
+    room?.send("admin_action", { action: "set_game_mode", gameMode: mode });
+
+  const handleAnswerQuestion = (questionId: number, answerIndex: number) =>
+    room?.send("answer_question", { questionId, answerIndex });
+
+  const handlePlaceBlock = (payload: BlockPlacePayload) =>
     room?.send("drop_block", {
       height: payload.height,
       diff: payload.diff,
@@ -274,19 +389,51 @@ export function App() {
       perfect: payload.perfect,
       isAlive: payload.isAlive,
     });
-  };
 
-  // Player select card
   const handleSelectCard = (cardType: CardType, targetSessionId?: string) => {
     room?.send("select_card", { cardType, targetSessionId });
     setCardChoices(null);
   };
 
+  // ── Cleanup saat component unmount (tutup tab/browser) ───────────────────
   useEffect(() => {
     return () => {
-      if (room) room.leave();
+      // Jangan leave saat unmount normal (React StrictMode double-invoke, HMR, dll)
+      // Hanya leave kalau user benar-benar tutup tab (pakai beforeunload)
     };
-  }, [room]);
+  }, []);
+
+  // Simpan roomCode ke sessionStorage setiap kali gameState berubah
+  useEffect(() => {
+    if (gameState?.roomCode) {
+      sessionStorage.setItem("tb_room_code", gameState.roomCode);
+    }
+    // Simpan role GM
+    if (room && gameState) {
+      const mySessionId = room.sessionId;
+      const isGM =
+        gameState.gameMasterSessionId === mySessionId ||
+        gameState.players?.[mySessionId]?.role === "GAME_MASTER";
+      if (isGM) {
+        sessionStorage.setItem("tb_role", "GAME_MASTER");
+      }
+    }
+  }, [gameState, room]);
+
+  // ── Render ───────────────────────────────────────────────────────────────
+
+  // Tampilkan loading screen saat sedang reconnect (jangan flash ke Lobby)
+  if (isLoading) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center gap-4">
+        <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center animate-pulse">
+          <span className="text-2xl">🏛️</span>
+        </div>
+        <p className="text-amber-200 font-bold text-sm">Menghubungkan ke Sayembara...</p>
+        <p className="text-slate-500 text-xs">Memulihkan sesi permainan</p>
+      </div>
+    );
+  }
 
   if (!room || !gameState) {
     return (
@@ -306,14 +453,12 @@ export function App() {
 
   return (
     <>
-      {/* Toast Notification Banner */}
       {feedNotification && (
         <div className="fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-2xl bg-stone-900/95 border-2 border-amber-500/60 backdrop-blur-md text-amber-200 text-xs font-bold shadow-2xl shadow-black/80 animate-bounce text-center max-w-md">
           {feedNotification}
         </div>
       )}
 
-      {/* Card Selection Modal (Milestone 5 Balok) */}
       {cardChoices && (
         <CardChoiceModal
           options={cardChoices}
@@ -324,7 +469,6 @@ export function App() {
         />
       )}
 
-      {/* Match Over Summary Modal */}
       {showSummary && (
         <MatchSummaryModal
           players={Object.values(gameState.players || {})}
@@ -349,6 +493,7 @@ export function App() {
           onResetGame={handleResetGame}
           onForceFinish={handleForceFinish}
           onAddBots={handleAddBots}
+          onSetGameMode={handleSetGameMode}
           onSwitchToPlay={() => setGmViewMode("play")}
           onLeave={handleLeave}
         />
@@ -366,7 +511,10 @@ export function App() {
           onSetMultiplier={handleSetMultiplier}
           onForceFinish={handleForceFinish}
           onAddBots={handleAddBots}
-          onSwitchToDashboard={() => setGmViewMode("dashboard")}
+          onSwitchToDashboard={isGameMaster ? () => setGmViewMode("dashboard") : undefined}
+          currentQuestion={currentQuestion}
+          questionResult={questionResult}
+          onAnswerQuestion={handleAnswerQuestion}
         />
       )}
     </>

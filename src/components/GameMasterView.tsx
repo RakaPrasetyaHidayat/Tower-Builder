@@ -13,6 +13,8 @@ import {
   Clock,
   Layers,
   Award,
+  Snowflake,
+  Hammer,
 } from "lucide-react";
 
 interface GameMasterViewProps {
@@ -291,7 +293,7 @@ export const GameMasterView: React.FC<GameMasterViewProps> = ({
                         : "bg-slate-950/70 border-slate-800"
                     }`}
                   >
-                    <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3 flex-1 min-w-0">
                       {/* Rank badge */}
                       <div
                         className={`w-7 h-7 rounded-lg flex items-center justify-center font-mono font-bold text-xs ${
@@ -307,19 +309,34 @@ export const GameMasterView: React.FC<GameMasterViewProps> = ({
                         {rank === 1 ? <Award className="w-4 h-4" /> : rank}
                       </div>
 
-                      {/* Nickname & combo */}
-                      <div>
-                        <div className="flex items-center gap-2">
+                      {/* Nickname, combo, and statuses */}
+                      <div className="flex-1">
+                        <div className="flex items-center flex-wrap gap-2">
                           <span className="font-bold text-sm text-white">
                             {player.nickname}
                           </span>
                           {!player.isAlive && (
-                            <span className="text-[10px] px-1.5 py-0.2 rounded bg-rose-950 text-rose-400 border border-rose-800">
-                              ELIMINATED
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-950 text-rose-400 border border-rose-800 font-bold tracking-wide">
+                              RUNTUH
+                            </span>
+                          )}
+                          {player.isFrozen && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-950 text-cyan-400 border border-cyan-800 font-bold flex items-center gap-1">
+                              <Snowflake className="w-3 h-3" /> BEKU
+                            </span>
+                          )}
+                          {player.hasAutoCrane && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold flex items-center gap-1">
+                              <Hammer className="w-3 h-3" /> AUTO-CRANE
+                            </span>
+                          )}
+                          {(player.doubleFundsUntil || 0) > Date.now() && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 font-bold flex items-center gap-1">
+                              <Zap className="w-3 h-3" /> 2x UPETI
                             </span>
                           )}
                         </div>
-                        <div className="text-[11px] text-slate-400 flex items-center gap-2">
+                        <div className="text-[11px] text-slate-400 flex items-center gap-2 mt-0.5">
                           <span>Tinggi: {player.towerHeight} Balok</span>
                           {player.combo > 0 && player.isAlive && (
                             <span className="text-sky-400 font-semibold">

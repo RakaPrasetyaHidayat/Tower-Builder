@@ -4,6 +4,8 @@ export type MatchStatus = "LOBBY" | "PLAYING" | "PAUSED" | "FINISHED";
 
 export type CardType = "DOUBLE_FUNDS" | "AUTO_CRANE" | "LAND_DISPUTE" | "CORRUPTION";
 
+export type GameMode = "fast_building" | "question_building";
+
 export interface CardOption {
   type: CardType;
   category: "BUFF" | "SABOTASE";
@@ -26,6 +28,8 @@ export interface PlayerData {
   frozenUntil?: number;
   doubleFundsUntil?: number;
   hasAutoCrane?: boolean;
+  canPlaceBlock?: boolean;
+  currentQuestionIdx?: number;
 }
 
 export interface GameStateData {
@@ -37,6 +41,7 @@ export interface GameStateData {
   isPaused: boolean;
   totalBlocksPlaced: number;
   winnerSessionId: string;
+  gameMode: GameMode;
   players: Record<string, PlayerData>;
 }
 
@@ -58,3 +63,17 @@ export interface DbSavedPayload {
   winner?: string;
 }
 
+export interface Question {
+  questionId: number;
+  text: string;
+  options: string[];
+  category: string;
+  questionNumber: number;
+}
+
+export interface QuestionResult {
+  correct: boolean;
+  correctIndex: number;
+  message: string;
+  penaltyMs?: number;
+}

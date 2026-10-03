@@ -5,7 +5,7 @@ import { QuestionManager, type CustomQuestion } from "./QuestionManager";
 import {
   Crown, Play, Pause, RotateCcw, Users, Copy, Check, Clock,
   Landmark, Snowflake, Shield, Bot, Gamepad2, Database, Flame,
-  CheckCircle2, Hammer, Zap, Zap as ZapIcon, Brain, ListChecks,
+  CheckCircle2, Hammer, Zap, Zap as ZapIcon, Brain,
 } from "lucide-react";
 
 interface AdminDashboardProps {
@@ -20,6 +20,9 @@ interface AdminDashboardProps {
   onForceFinish?: () => void;
   onAddBots?: () => void;
   onSetGameMode?: (mode: GameMode) => void;
+  customQuestions: CustomQuestion[];
+  customQuestionsSaved: boolean;
+  onCustomQuestionsChange: (questions: CustomQuestion[]) => void;
   onSetCustomQuestions?: (questions: CustomQuestion[]) => void;
   onSwitchToPlay?: () => void;
   onLeave: () => void;
@@ -37,6 +40,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onForceFinish,
   onAddBots,
   onSetGameMode,
+  customQuestions,
+  customQuestionsSaved,
+  onCustomQuestionsChange,
+  onSetCustomQuestions,
   onSwitchToPlay,
   onLeave,
 }) => {
@@ -83,6 +90,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const totalPlayers = playersList.length;
   const nonGMPlayers = playersList.filter((p) => p.role !== "GAME_MASTER").length;
   const alivePlayers = playersList.filter((p) => p.isAlive && p.role !== "GAME_MASTER").length;
+  const hasValidCustomQuestions = customQuestions.length > 0 && customQuestions.every((question) =>
+    question.text.trim().length > 0 && question.options.length === 4 &&
+    question.options.every((option) => option.trim().length > 0) &&
+    Number.isInteger(question.correctIndex) && question.correctIndex >= 0 && question.correctIndex < 4
+  );
 
   const formatTimer = (seconds: number) => {
     const mins = Math.floor(seconds / 60);
@@ -315,6 +327,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                 )}
 
+                {state.gameMode === "question_building" && (
+                  <div className="rounded-2xl border border-indigo-200 bg-white p-3 space-y-2">
+                    <QuestionManager
+                      questions={customQuestions}
+                      onChange={onCustomQuestionsChange}
+                      onSave={(questions) => onSetCustomQuestions?.(questions)}
+                    />
+                  </div>
+                )}
+
                 {/* Duration selector */}
                 <div>
                   <label className="block text-xs font-bold text-slate-600 mb-1.5">
@@ -349,11 +371,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <button
                   type="button"
                   onClick={() => onStart(gameDuration)}
-                  className="w-full py-3.5 px-4 rounded-2xl font-black text-sm text-stone-950 bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 shadow-xl shadow-amber-500/25 active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer"
+                  disabled={state.gameMode === "question_building" && (!hasValidCustomQuestions || !customQuestionsSaved)}
+                  className="w-full py-3.5 px-4 rounded-2xl font-black text-sm text-stone-950 bg-gradient-to-r from-amber-400 via-yellow-400 to-amber-500 hover:from-amber-300 hover:to-yellow-300 shadow-xl shadow-amber-500/25 active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <Play className="w-4 h-4 fill-stone-950 text-stone-950" />
                   <span>Mulai Sayembara Nusantara</span>
                 </button>
+                {state.gameMode === "question_building" && !customQuestionsSaved && (
+                  <p className="text-[11px] text-amber-700 text-center">
+                    Simpan perubahan soal sebelum memulai.
+                  </p>
+                )}
                 {totalPlayers <= 1 && (
                   <p className="text-[11px] text-amber-600/70 text-center">
                     💡 Anda bisa mulai uji coba sendiri atau tekan tombol Tambah Bot di bawah!
@@ -628,14 +656,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <Snowflake className="w-3 h-3" /> BEKU
                             </span>
                           )}
-                          {player.hasAutoCrane && (
+                          {player.budgetBlocksRemaining && (
                             <span className="px-2 py-0.5 rounded bg-emerald-50 text-emerald-700 border border-emerald-200 font-bold flex items-center gap-1">
-                              <Hammer className="w-3 h-3" /> AUTO-CRANE
+                              <Hammer className="w-3 h-3" /> EFISIENSI {player.budgetBlocksRemaining}
                             </span>
                           )}
-                          {(player.doubleFundsUntil || 0) > Date.now() && (
+                          {player.hasBLT && (
                             <span className="px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200 font-bold flex items-center gap-1">
-                              <Zap className="w-3 h-3" /> 2x UPETI
+                              <Zap className="w-3 h-3" /> BLT
                             </span>
                           )}
                         </div>

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import type { CardOption, CardType, PlayerData } from "../types/game";
-import { Sparkles, Snowflake, Coins, Hammer, Users, Clock, Flame } from "lucide-react";
+import { Sparkles, Snowflake, Coins, Hammer, Users, Clock, Flame, ShieldCheck, Building2 } from "lucide-react";
 
 interface CardChoiceModalProps {
   options: CardOption[];
@@ -62,29 +62,41 @@ export const CardChoiceModal: React.FC<CardChoiceModalProps> = ({
 
   const getIndonesianCardDetails = (type: CardType) => {
     switch (type) {
-      case "DOUBLE_FUNDS":
+      case "BUDGET_EFFICIENCY":
         return {
-          title: "Berkah Dewi Sri",
-          desc: "Kemakmuran melimpah! Gandakan skor 2x selama 10 detik.",
+          title: "Efisiensi Anggaran",
+          desc: "Poin dari 3 blok berikutnya menjadi 2x.",
           icon: <Coins className="w-6 h-6 text-amber-300" />,
         };
-      case "AUTO_CRANE":
+      case "LIQUID_BUDGET":
         return {
-          title: "Tangan Sakti Empu",
-          desc: "Keahlian leluhur! Balok berikutnya 100% presisi di tengah.",
+          title: "Anggaran Cair",
+          desc: "Dua blok gratis otomatis tersusun dengan presisi sempurna.",
           icon: <Hammer className="w-6 h-6 text-yellow-300" />,
         };
-      case "LAND_DISPUTE":
+      case "BLT":
         return {
-          title: "Kutukan Jonggrang",
-          desc: "Jadikan lawan arca batu! Membekukan target selama 5 detik.",
-          icon: <Snowflake className="w-6 h-6 text-cyan-300" />,
+          title: "BLT (Balasan Langsung Tuntas)",
+          desc: "Pantulkan sabotase berikutnya dan dapatkan 200 poin.",
+          icon: <ShieldCheck className="w-6 h-6 text-emerald-300" />,
         };
       case "CORRUPTION":
         return {
-          title: "Upeti Kadipaten",
-          desc: "Tarik upeti paksa! Pangkas 25% perolehan skor lawan target.",
+          title: "Korupsi",
+          desc: "Ambil 25% poin lawan, minimal 100 poin.",
           icon: <Flame className="w-6 h-6 text-rose-400" />,
+        };
+      case "STALLED_PROJECT":
+        return {
+          title: "Proyek Mangkrak",
+          desc: "Bekukan lawan selama 5 detik.",
+          icon: <Snowflake className="w-6 h-6 text-cyan-300" />,
+        };
+      case "BUILDING_EVICTION":
+        return {
+          title: "Bangunan Ditertibkan",
+          desc: "Curi hingga 2 blok teratas beserta poin bloknya.",
+          icon: <Building2 className="w-6 h-6 text-rose-300" />,
         };
     }
   };
@@ -171,7 +183,7 @@ export const CardChoiceModal: React.FC<CardChoiceModalProps> = ({
         </div>
 
         {/* Target Selection for Sabotage */}
-        {selectedCard && (selectedCard === "LAND_DISPUTE" || selectedCard === "CORRUPTION") && (
+        {selectedCard && ["CORRUPTION", "STALLED_PROJECT", "BUILDING_EVICTION"].includes(selectedCard) && (
           <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 mb-4 animate-fadeIn">
             <label className="block text-xs font-bold text-slate-800 mb-2 flex items-center gap-1.5">
               <Users className="w-3.5 h-3.5 text-amber-600" />

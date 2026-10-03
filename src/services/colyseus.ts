@@ -20,7 +20,7 @@ function getWsUrl(): string {
 
 export const colyseusClient = new Client(getWsUrl());
 
-function generateClientRoomCode(): string {
+export function generateClientRoomCode(): string {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
   for (let i = 0; i < 6; i++) {
@@ -29,8 +29,7 @@ function generateClientRoomCode(): string {
   return code;
 }
 
-export async function createGameRoom(nickname: string): Promise<Room<any>> {
-  const roomCode = generateClientRoomCode();
+export async function createGameRoom(nickname: string, roomCode = generateClientRoomCode()): Promise<Room<any>> {
   return colyseusClient.create("tower_room", {
     isHost: true,
     nickname: nickname.trim(),
@@ -71,12 +70,7 @@ export async function joinGameRoom(
     });
   }
 
-  // Fallback: joinOrCreate (hanya dipakai kalau API room tidak bisa dicapai)
-  return colyseusClient.joinOrCreate("tower_room", {
-    roomCode: cleanCode,
-    isHost: false,
-    nickname: nickname.trim(),
-  });
+  throw new Error("Sayembara tidak ditemukan atau server pencarian room tidak dapat dihubungi.");
 }
 
 export async function reconnectGameRoom(

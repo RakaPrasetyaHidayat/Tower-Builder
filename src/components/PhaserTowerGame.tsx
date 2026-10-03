@@ -5,6 +5,10 @@ import type { DropBlockData, TowerSceneConfig } from "../game/scenes/TowerScene"
 
 export interface PhaserTowerGameHandle {
   triggerDrop: () => void;
+  autoPlaceBlocks: (count: number) => void;
+  syncTowerHeight: (height: number) => void;
+  setGameActive: (active: boolean) => void;
+  resetTiltSum: () => void;
 }
 
 interface PhaserTowerGameProps {
@@ -21,6 +25,14 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
     const containerRef = useRef<HTMLDivElement | null>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
     const sceneRef = useRef<TowerScene | null>(null);
+    const latestHeightRef = useRef(initialHeight ?? 0);
+    const latestPausedRef = useRef(isPaused);
+    const latestPlayingRef = useRef(isPlaying);
+    const latestFrozenRef = useRef(isFrozen);
+    latestHeightRef.current = initialHeight ?? 0;
+    latestPausedRef.current = isPaused;
+    latestPlayingRef.current = isPlaying;
+    latestFrozenRef.current = isFrozen;
 
     // Ref untuk selalu punya callback terbaru tanpa restart Phaser
     const callbacksRef = useRef({ onDropBlock, onTowerCollapsed });
@@ -32,6 +44,10 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
       triggerDrop: () => {
         sceneRef.current?.triggerDrop();
       },
+      autoPlaceBlocks: (count) => sceneRef.current?.autoPlaceBlocks(count),
+      syncTowerHeight: (height) => sceneRef.current?.syncTowerHeight(height),
+      setGameActive: (active) => sceneRef.current?.setGameActive(active),
+      resetTiltSum: () => sceneRef.current?.resetTiltSum(),
     }));
 
     useEffect(() => {
@@ -88,10 +104,11 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
         const scene = scenes[0] as TowerScene;
         if (scene) {
           sceneRef.current = scene;
-          // JANGAN set pause berdasarkan props awal — biarkan scene aktif
-          // State akan di-sync lewat useEffect di bawah saat props berubah
-          scene.setPauseState(false);  // default: aktif
-          scene.setFrozenState(false);
+          // Set game active SEBELUM sync height agar spawnSwingingBlock bisa jalan
+          scene.setGameActive(latestPlayingRef.current);
+          scene.setPauseState(latestPausedRef.current);
+          scene.setFrozenState(latestFrozenRef.current);
+          scene.syncTowerHeight(latestHeightRef.current);
         }
       });
 
@@ -103,10 +120,15 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
       // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []); // Mount sekali saja
 
-    // Sync pause/frozen state
+    useEffect(() => {
+      sceneRef.current?.syncTowerHeight(initialHeight ?? 0);
+    }, [initialHeight]);
+
+    // Sync pause/frozen state — pisahkan isPlaying (game active) dari isPaused (GM pause)
     useEffect(() => {
       if (sceneRef.current) {
-        sceneRef.current.setPauseState(isPaused || !isPlaying);
+        sceneRef.current.setGameActive(isPlaying);
+        sceneRef.current.setPauseState(isPaused);
         sceneRef.current.setFrozenState(isFrozen);
       }
     }, [isPlaying, isPaused, isFrozen]);

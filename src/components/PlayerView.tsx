@@ -1,16 +1,17 @@
-import React, { useState, useRef } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import type { GameStateData, BlockPlacePayload, Question, QuestionResult } from "../types/game";
 import { PhaserTowerGame, type PhaserTowerGameHandle } from "./PhaserTowerGame";
 import type { DropBlockData } from "../game/scenes/TowerScene";
 import { QuestionOverlay } from "./QuestionOverlay";
 import {
   Clock, Trophy, Flame, Snowflake, LogOut, Landmark, Coins, Hammer,
-  Play, Crown, Bot, LayoutDashboard, Zap,
+  Play, Crown, Bot, LayoutDashboard,
 } from "lucide-react";
 
 interface PlayerViewProps {
   state: GameStateData;
   sessionId: string;
+  autoPlaceRequest: number;
   isGameMaster?: boolean;
   onPlaceBlock: (payload: BlockPlacePayload) => void;
   onLeave: () => void;
@@ -29,6 +30,7 @@ interface PlayerViewProps {
 export const PlayerView: React.FC<PlayerViewProps> = ({
   state,
   sessionId,
+  autoPlaceRequest,
   isGameMaster = false,
   onPlaceBlock,
   onLeave,
@@ -45,6 +47,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 }) => {
   const [currentTilt, setCurrentTilt] = useState(0);
   const gameRef = useRef<PhaserTowerGameHandle | null>(null);
+  const handledAutoPlaceRequest = useRef(autoPlaceRequest);
+
+  useEffect(() => {
+    if (autoPlaceRequest === handledAutoPlaceRequest.current) return;
+    const newRequests = autoPlaceRequest - handledAutoPlaceRequest.current;
+    handledAutoPlaceRequest.current = autoPlaceRequest;
+    gameRef.current?.autoPlaceBlocks(newRequests * 2);
+  }, [autoPlaceRequest]);
 
   const myPlayer = state.players?.[sessionId];
 
@@ -68,6 +78,20 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const isQuestionMode = state.gameMode === "question_building";
   // Boleh tap drop hanya jika: bukan question mode, ATAU question mode dan canPlaceBlock=true
   const canDrop = !isQuestionMode || Boolean(myPlayer?.canPlaceBlock);
+
+  // Sync isGameActive ke scene saat status berubah
+  const prevPlayingRef = useRef(isPlaying);
+  useEffect(() => {
+    if (prevPlayingRef.current !== isPlaying) {
+      prevPlayingRef.current = isPlaying;
+      gameRef.current?.setGameActive(isPlaying);
+      // Saat game mulai, reset tilt dan sync height
+      if (isPlaying) {
+        gameRef.current?.resetTiltSum();
+        gameRef.current?.syncTowerHeight(myPlayer?.towerHeight || 0);
+      }
+    }
+  }, [isPlaying, myPlayer?.towerHeight]);
 
   const handleDropBlock = (data: DropBlockData) => {
     setCurrentTilt(data.tiltSum);
@@ -136,8 +160,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const getPlayerStatus = (p: typeof playersList[0]) => {
     if (!p.isAlive) return { label: "Runtuh", color: "text-rose-400", bg: "bg-rose-500/20" };
     if (p.isFrozen) return { label: "Sabotase", color: "text-cyan-300", bg: "bg-cyan-500/20" };
-    if (p.doubleFundsUntil && p.doubleFundsUntil > Date.now()) return { label: "2x Upeti", color: "text-amber-300", bg: "bg-amber-500/20" };
-    if (p.hasAutoCrane) return { label: "Auto-Crane", color: "text-emerald-300", bg: "bg-emerald-500/20" };
+    if (p.budgetBlocksRemaining) return { label: `Efisiensi x${p.budgetBlocksRemaining}`, color: "text-amber-300", bg: "bg-amber-500/20" };
+    if (p.hasBLT) return { label: "BLT Aktif", color: "text-emerald-300", bg: "bg-emerald-500/20" };
     return null;
   };
 
@@ -158,65 +182,68 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
       {/* ═══════ FLOATING HUD OVERLAYS ═══════ */}
 
-      {/* Central Status Alerts */}
-      <div className="absolute top-24 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none">
+      {/* Central Status Alerts — frozen/buff banners */}
+      <div className="absolute top-16 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-1.5 pointer-events-none w-max max-w-[90vw]">
         {isFrozen && (
-          <div className="px-6 py-3 rounded-3xl bg-cyan-950/80 backdrop-blur-md border-2 border-cyan-400 shadow-[0_0_30px_rgba(34,211,238,0.5)] flex items-center gap-3 animate-pulse">
-            <Snowflake className="w-8 h-8 text-cyan-300 animate-spin" style={{ animationDuration: "3s" }} />
-            <div className="text-center">
-              <div className="text-cyan-100 font-black text-xl tracking-widest uppercase">Tersabotase!</div>
-              <div className="text-cyan-300/80 text-[10px] font-bold">KUTUKAN ARCA BEKU</div>
+          <div className="px-4 py-2 rounded-2xl bg-cyan-950/90 backdrop-blur-md border-2 border-cyan-400 shadow-[0_0_24px_rgba(34,211,238,0.5)] flex items-center gap-2 animate-pulse">
+            <Snowflake className="w-5 h-5 text-cyan-300 animate-spin shrink-0" style={{ animationDuration: "3s" }} />
+            <div>
+              <div className="text-cyan-100 font-black text-sm tracking-widest uppercase">Tersabotase!</div>
+              <div className="text-cyan-300/80 text-[9px] font-bold">KUTUKAN ARCA BEKU</div>
             </div>
           </div>
         )}
-        {myPlayer?.hasAutoCrane && (
-          <div className="px-4 py-2 rounded-2xl bg-emerald-950/80 backdrop-blur-md border border-emerald-400/50 shadow-[0_0_20px_rgba(52,211,153,0.3)] flex items-center gap-2">
-            <Hammer className="w-5 h-5 text-emerald-400 animate-bounce" />
-            <span className="text-emerald-100 font-black text-sm uppercase">Auto-Crane Aktif</span>
+        {!isFrozen && myPlayer?.budgetBlocksRemaining ? (
+          <div className="px-3 py-1.5 rounded-xl bg-amber-950/90 backdrop-blur-md border border-amber-400/50 flex items-center gap-1.5">
+            <Coins className="w-4 h-4 text-amber-300 shrink-0" />
+            <span className="text-amber-100 font-black text-xs uppercase">Efisiensi: {myPlayer.budgetBlocksRemaining} blok</span>
           </div>
-        )}
+        ) : !isFrozen && myPlayer?.hasBLT ? (
+          <div className="px-3 py-1.5 rounded-xl bg-emerald-950/90 backdrop-blur-md border border-emerald-400/50 flex items-center gap-1.5">
+            <Flame className="w-4 h-4 text-emerald-300 shrink-0" />
+            <span className="text-emerald-100 font-black text-xs uppercase">BLT Aktif</span>
+          </div>
+        ) : null}
       </div>
 
-      {/* Top-Left: Score & Timer Pill */}
-      <div className="absolute top-3 left-3 z-30 flex flex-col gap-2">
-        {/* Score */}
-        <div className="flex items-center gap-2 bg-black/50 backdrop-blur-md rounded-2xl px-3 py-2 border border-white/10">
-          <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shadow-lg shadow-amber-500/30">
-            <Coins className="w-4 h-4 text-white" />
+      {/* Top-Left: Score + Timer stacked */}
+      <div className="absolute top-2 left-2 z-30 flex flex-col gap-1.5">
+        {/* Score pill */}
+        <div className="flex items-center gap-1.5 bg-black/60 backdrop-blur-md rounded-xl px-2.5 py-1.5 border border-white/10">
+          <div className="w-6 h-6 rounded-lg bg-gradient-to-br from-amber-400 to-amber-600 flex items-center justify-center shrink-0">
+            <Coins className="w-3.5 h-3.5 text-white" />
           </div>
           <div>
-            <div className="text-[10px] text-white/50 font-semibold uppercase tracking-wider">Upeti</div>
-            <div className="text-lg font-black text-white font-mono leading-tight">
+            <div className="text-[9px] text-white/40 font-semibold uppercase leading-none">Upeti</div>
+            <div className="text-sm font-black text-white font-mono leading-tight">
               {(myPlayer?.score || 0).toLocaleString()}
             </div>
           </div>
         </div>
 
         {/* Timer */}
-        <div
-          className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl border backdrop-blur-md text-xs font-mono font-black ${
-            state.timeRemaining < 30
-              ? "bg-rose-500/30 border-rose-400/40 text-rose-200 animate-pulse"
-              : "bg-black/40 border-white/10 text-white/80"
-          }`}
-        >
-          <Clock className="w-3.5 h-3.5" />
+        <div className={`flex items-center gap-1 px-2.5 py-1 rounded-lg border backdrop-blur-md text-xs font-mono font-black ${
+          state.timeRemaining < 30
+            ? "bg-rose-500/30 border-rose-400/40 text-rose-200 animate-pulse"
+            : "bg-black/50 border-white/10 text-white/70"
+        }`}>
+          <Clock className="w-3 h-3 shrink-0" />
           <span>{formatTimer(state.timeRemaining)}</span>
         </div>
 
         {/* Tilt Indicator */}
         {isPlaying && (
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-black/40 backdrop-blur-md border border-white/10">
-            <div className="relative w-16 h-1.5 rounded-full bg-white/10 overflow-hidden">
+          <div className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-black/50 backdrop-blur-md border border-white/10">
+            <div className="relative w-12 h-1.5 rounded-full bg-white/10 overflow-hidden shrink-0">
               <div
                 className={`absolute inset-y-0 left-0 rounded-full transition-all duration-300 ${
                   tiltDanger === "critical" ? "bg-rose-500" : tiltDanger === "warning" ? "bg-amber-400" : "bg-emerald-400"
                 }`}
-                style={{ width: `${Math.min(100, (tiltAbs / 30) * 100)}%` }}
+                style={{ width: `${Math.min(100, (tiltAbs / 25) * 100)}%` }}
               />
             </div>
-            <span className={`text-[10px] font-mono font-bold ${
-              tiltDanger === "critical" ? "text-rose-400" : "text-white/60"
+            <span className={`text-[9px] font-mono font-bold ${
+              tiltDanger === "critical" ? "text-rose-400" : "text-white/50"
             }`}>
               {currentTilt > 0 ? "+" : ""}{currentTilt.toFixed(1)}°
             </span>
@@ -224,31 +251,26 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         )}
       </div>
 
-      {/* Top-Right: Leaderboard Overlay */}
-      <div className="absolute top-3 right-3 z-30 w-48 sm:w-56">
-        <div className="bg-black/50 backdrop-blur-md rounded-2xl border border-white/10 overflow-hidden">
-          {/* Leaderboard Header */}
-          <div className="flex items-center gap-1.5 px-3 py-2 border-b border-white/10">
-            <Trophy className="w-3.5 h-3.5 text-amber-400" />
-            <span className="text-[11px] font-black text-white/80 uppercase tracking-wider">Peringkat</span>
+      {/* Top-Right: Leaderboard — compact on mobile */}
+      <div className="absolute top-2 right-2 z-30 w-36 xs:w-40 sm:w-52">
+        <div className="bg-black/60 backdrop-blur-md rounded-xl border border-white/10 overflow-hidden">
+          <div className="flex items-center gap-1 px-2 py-1.5 border-b border-white/10">
+            <Trophy className="w-3 h-3 text-amber-400 shrink-0" />
+            <span className="text-[10px] font-black text-white/70 uppercase tracking-wider">Peringkat</span>
           </div>
-
-          {/* Top 5 Players */}
-          <div className="p-1.5 space-y-0.5">
+          <div className="p-1 space-y-0.5">
             {top5.map((player, idx) => {
               const rank = idx + 1;
               const isMe = player.sessionId === sessionId;
               const status = getPlayerStatus(player);
-
               return (
                 <div
                   key={player.sessionId}
-                  className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg transition-all ${
+                  className={`flex items-center gap-1 px-1.5 py-1 rounded-lg transition-all ${
                     isMe ? "bg-amber-500/20 border border-amber-400/30" : "hover:bg-white/5"
                   }`}
                 >
-                  {/* Rank Badge */}
-                  <span className={`w-5 h-5 rounded-md text-[10px] font-black flex items-center justify-center shrink-0 ${
+                  <span className={`w-4 h-4 rounded text-[9px] font-black flex items-center justify-center shrink-0 ${
                     rank === 1 ? "bg-amber-400 text-slate-900"
                     : rank === 2 ? "bg-slate-300 text-slate-900"
                     : rank === 3 ? "bg-amber-700 text-white"
@@ -256,49 +278,34 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
                   }`}>
                     {rank}
                   </span>
-
-                  {/* Name & Status */}
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-1">
-                      <span className={`text-[11px] font-bold truncate ${isMe ? "text-amber-200" : "text-white/70"}`}>
+                    <div className="flex items-center gap-0.5">
+                      <span className={`text-[10px] font-bold truncate ${isMe ? "text-amber-200" : "text-white/70"}`}>
                         {player.nickname}
                       </span>
-                      {player.role === "GAME_MASTER" && <Crown className="w-3 h-3 text-amber-400 shrink-0" />}
+                      {player.role === "GAME_MASTER" && <Crown className="w-2.5 h-2.5 text-amber-400 shrink-0" />}
                     </div>
                     {status && (
-                      <span className={`text-[9px] font-bold ${status.color} flex items-center gap-0.5`}>
-                        {status.label === "Sabotase" && <Snowflake className="w-2.5 h-2.5" />}
-                        {status.label === "2x Upeti" && <Zap className="w-2.5 h-2.5" />}
-                        {status.label}
-                      </span>
+                      <span className={`text-[8px] font-bold ${status.color}`}>{status.label}</span>
                     )}
                   </div>
-
-                  {/* Score */}
-                  <span className={`text-[11px] font-mono font-bold shrink-0 ${isMe ? "text-amber-300" : "text-white/50"}`}>
+                  <span className={`text-[10px] font-mono font-bold shrink-0 ${isMe ? "text-amber-300" : "text-white/50"}`}>
                     {player.score.toLocaleString()}
                   </span>
                 </div>
               );
             })}
-
-            {/* Own rank if not in top 5 */}
             {myRank > 5 && myPlayer && (
               <>
-                <div className="text-center text-white/20 text-[10px] py-0.5">• • •</div>
-                <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-500/20 border border-amber-400/30">
-                  <span className="w-5 h-5 rounded-md text-[10px] font-black flex items-center justify-center bg-white/10 text-white/50 shrink-0">
+                <div className="text-center text-white/20 text-[9px] py-0.5">• • •</div>
+                <div className="flex items-center gap-1 px-1.5 py-1 rounded-lg bg-amber-500/20 border border-amber-400/30">
+                  <span className="w-4 h-4 rounded text-[9px] font-black flex items-center justify-center bg-white/10 text-white/50 shrink-0">
                     {myRank}
                   </span>
                   <div className="flex-1 min-w-0">
-                    <span className="text-[11px] font-bold text-amber-200 truncate block">{myPlayer.nickname}</span>
-                    {getPlayerStatus(myPlayer) && (
-                      <span className={`text-[9px] font-bold ${getPlayerStatus(myPlayer)!.color}`}>
-                        {getPlayerStatus(myPlayer)!.label}
-                      </span>
-                    )}
+                    <span className="text-[10px] font-bold text-amber-200 truncate block">{myPlayer.nickname}</span>
                   </div>
-                  <span className="text-[11px] font-mono font-bold text-amber-300 shrink-0">
+                  <span className="text-[10px] font-mono font-bold text-amber-300 shrink-0">
                     {myPlayer.score.toLocaleString()}
                   </span>
                 </div>
@@ -308,41 +315,32 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       </div>
 
-      {/* Top-Center: Room Code (tiny pill) */}
-      <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30">
-        <div className="flex items-center gap-1 bg-black/40 backdrop-blur-md rounded-full px-3 py-1 border border-white/10">
-          <Landmark className="w-3 h-3 text-amber-400/70" />
-          <span className="text-[10px] font-mono font-bold text-white/50">#{state.roomCode}</span>
+      {/* Top-Center: Room Code pill */}
+      <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30">
+        <div className="flex items-center gap-1 bg-black/50 backdrop-blur-md rounded-full px-2.5 py-1 border border-white/10">
+          <Landmark className="w-2.5 h-2.5 text-amber-400/70" />
+          <span className="text-[9px] font-mono font-bold text-white/50">#{state.roomCode}</span>
         </div>
       </div>
 
-      {/* Bottom-Center: Combo / Frozen Status */}
-      {isPlaying && (
-        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 flex flex-col items-center gap-2">
-          {myPlayer?.combo && myPlayer.combo > 1 ? (
-            <div className="flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-orange-500/30 backdrop-blur-md border border-orange-400/40 animate-bounce">
-              <Flame className="w-5 h-5 text-orange-400" />
-              <span className="text-sm font-black text-orange-200">Kombo {myPlayer.combo}x!</span>
-            </div>
-          ) : null}
-
-          {isFrozen && (
-            <div className="flex items-center gap-2 px-5 py-2.5 rounded-2xl bg-cyan-500/30 backdrop-blur-md border border-cyan-400/40 animate-pulse">
-              <Snowflake className="w-5 h-5 text-cyan-300" />
-              <span className="text-sm font-black text-cyan-200">Tersabotase!</span>
-            </div>
-          )}
+      {/* Bottom-Center: Combo indicator */}
+      {isPlaying && myPlayer?.combo && myPlayer.combo > 1 && (
+        <div className="absolute bottom-20 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+          <div className="flex items-center gap-1.5 px-4 py-2 rounded-2xl bg-orange-500/30 backdrop-blur-md border border-orange-400/40 animate-bounce">
+            <Flame className="w-4 h-4 text-orange-400" />
+            <span className="text-sm font-black text-orange-200">Kombo {myPlayer.combo}x!</span>
+          </div>
         </div>
       )}
 
-      {/* Bottom: Tap-to-Drop Zone — hanya tampil jika boleh drop */}
+      {/* Bottom: Tap-to-Drop button — full width, safe area aware */}
       {isPlaying && !isPaused && !isFrozen && canDrop && (
-        <div className="absolute bottom-0 left-0 right-0 z-30 p-3">
+        <div className="absolute bottom-0 left-0 right-0 z-30 p-3 pb-[max(12px,env(safe-area-inset-bottom))]">
           <button
             type="button"
             onClick={handleTapDrop}
             onTouchStart={handleTapDrop}
-            className="w-full py-4 rounded-2xl font-black text-sm text-white/90 bg-white/10 backdrop-blur-md border border-white/15 active:bg-white/20 active:scale-[0.98] transition-all flex items-center justify-center gap-2 cursor-pointer touch-manipulation"
+            className="w-full py-4 rounded-2xl font-black text-sm text-white/90 bg-white/10 backdrop-blur-md border border-white/15 active:bg-white/20 active:scale-[0.99] transition-transform flex items-center justify-center gap-2 cursor-pointer touch-manipulation"
           >
             <Hammer className="w-5 h-5 text-amber-400" />
             <span>KETUK UNTUK MENARUH BALOK</span>
@@ -350,7 +348,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         </div>
       )}
 
-      {/* Question Building overlay — tampil di atas game canvas */}
+      {/* Question Building overlay */}
       {isPlaying && !isPaused && isQuestionMode && onAnswerQuestion && (
         <QuestionOverlay
           question={currentQuestion ?? null}
@@ -360,51 +358,35 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
         />
       )}
 
-      {/* GM Controls (small floating pills) */}
-      {isGameMaster && (
-        <div className="absolute bottom-3 left-3 z-30 flex flex-col gap-1.5">
-          {onSwitchToDashboard && (
-            <button
-              type="button"
-              onClick={onSwitchToDashboard}
-              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/50 backdrop-blur-md border border-white/10 text-white/60 hover:text-white text-[11px] font-bold transition-all cursor-pointer"
-            >
-              <LayoutDashboard className="w-3.5 h-3.5" />
-              <span className="hidden sm:inline">Admin</span>
-            </button>
-          )}
+      {/* Bottom-Left controls */}
+      <div className="absolute bottom-[calc(env(safe-area-inset-bottom)+60px)] left-2 z-30 flex flex-col gap-1.5">
+        {isGameMaster && onSwitchToDashboard && (
           <button
             type="button"
-            onClick={onLeave}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/50 backdrop-blur-md border border-white/10 text-white/40 hover:text-rose-400 text-[11px] font-bold transition-all cursor-pointer"
+            onClick={onSwitchToDashboard}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/60 backdrop-blur-md border border-white/10 text-white/60 hover:text-white text-[10px] font-bold transition-all cursor-pointer"
           >
-            <LogOut className="w-3.5 h-3.5" />
+            <LayoutDashboard className="w-3.5 h-3.5" />
           </button>
-        </div>
-      )}
-
-      {/* Non-GM Leave Button */}
-      {!isGameMaster && (
-        <div className="absolute bottom-3 left-3 z-30">
-          <button
-            type="button"
-            onClick={onLeave}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/50 backdrop-blur-md border border-white/10 text-white/40 hover:text-rose-400 text-[11px] font-bold transition-all cursor-pointer"
-          >
-            <LogOut className="w-3.5 h-3.5" />
-          </button>
-        </div>
-      )}
+        )}
+        <button
+          type="button"
+          onClick={onLeave}
+          className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-black/60 backdrop-blur-md border border-white/10 text-white/40 hover:text-rose-400 text-[10px] font-bold transition-all cursor-pointer"
+        >
+          <LogOut className="w-3.5 h-3.5" />
+        </button>
+      </div>
 
       {/* ═══════ FULL-SCREEN OVERLAYS ═══════ */}
 
       {/* Lobby Waiting Overlay */}
       {isLobby && (
-        <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
-          <div className="w-16 h-16 rounded-2xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center mb-4 animate-bounce">
-            <Landmark className="w-8 h-8 text-amber-400" />
+        <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
+          <div className="w-14 h-14 rounded-2xl bg-amber-500/20 border border-amber-400/30 flex items-center justify-center mb-4 animate-bounce">
+            <Landmark className="w-7 h-7 text-amber-400" />
           </div>
-          <h2 className="text-2xl font-black text-white mb-2">
+          <h2 className="text-xl font-black text-white mb-2">
             {isGameMaster ? "Sayembara Siap Dimulai" : "Menanti Titah Sultan"}
           </h2>
           <p className="text-sm text-white/50 max-w-xs mb-6">
@@ -412,7 +394,6 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               ? "Tekan tombol di bawah untuk mulai bertanding."
               : "Sultan akan segera memulai pertandingan."}
           </p>
-
           {isGameMaster ? (
             <div className="flex flex-col gap-3 w-full max-w-xs">
               {onStart && (
@@ -446,8 +427,8 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
       {/* Paused Overlay */}
       {isPaused && (
-        <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
-          <div className="px-6 py-3 rounded-2xl bg-amber-500/20 border border-amber-400/30 text-amber-300 font-black text-lg uppercase tracking-wider mb-3">
+        <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
+          <div className="px-5 py-2.5 rounded-2xl bg-amber-500/20 border border-amber-400/30 text-amber-300 font-black text-base uppercase tracking-wider mb-3">
             Sayembara Dijeda
           </div>
           <p className="text-sm text-white/40 mb-4">Pertandingan ditunda oleh Sultan.</p>
@@ -466,11 +447,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 
       {/* Finished Overlay */}
       {isFinished && (
-        <div className="absolute inset-0 bg-slate-900/80 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
-          <Trophy className="w-12 h-12 text-amber-400 mb-3" />
-          <h2 className="text-2xl font-black text-white mb-1">Sayembara Selesai!</h2>
+        <div className="absolute inset-0 bg-slate-900/85 backdrop-blur-lg flex flex-col items-center justify-center p-6 text-center z-40">
+          <Trophy className="w-10 h-10 text-amber-400 mb-3" />
+          <h2 className="text-xl font-black text-white mb-1">Sayembara Selesai!</h2>
           <p className="text-sm text-white/50 mb-4">
-            Peringkat Anda: <span className="text-amber-400 font-black">#{myRank}</span> • Skor: <span className="text-amber-400 font-black">{myPlayer?.score || 0}</span>
+            Peringkat Anda: <span className="text-amber-400 font-black">#{myRank}</span> • Skor: <span className="text-amber-400 font-black">{(myPlayer?.score || 0).toLocaleString()}</span>
           </p>
           <button
             type="button"

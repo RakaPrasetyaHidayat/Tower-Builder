@@ -2,7 +2,13 @@ export type UserRole = "GAME_MASTER" | "PLAYER";
 
 export type MatchStatus = "LOBBY" | "PLAYING" | "PAUSED" | "FINISHED";
 
-export type CardType = "DOUBLE_FUNDS" | "AUTO_CRANE" | "LAND_DISPUTE" | "CORRUPTION";
+export type CardType =
+  | "BUDGET_EFFICIENCY"
+  | "LIQUID_BUDGET"
+  | "BLT"
+  | "CORRUPTION"
+  | "STALLED_PROJECT"
+  | "BUILDING_EVICTION";
 
 export type GameMode = "fast_building" | "question_building";
 
@@ -26,8 +32,8 @@ export interface PlayerData {
   lastPlacedAt: number;
   isFrozen?: boolean;
   frozenUntil?: number;
-  doubleFundsUntil?: number;
-  hasAutoCrane?: boolean;
+  budgetBlocksRemaining?: number;
+  hasBLT?: boolean;
   canPlaceBlock?: boolean;
   currentQuestionIdx?: number;
 }

@@ -325,14 +325,14 @@ export const GameMasterView: React.FC<GameMasterViewProps> = ({
                               <Snowflake className="w-3 h-3" /> BEKU
                             </span>
                           )}
-                          {player.hasAutoCrane && (
+                          {player.budgetBlocksRemaining && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-400 border border-emerald-800 font-bold flex items-center gap-1">
-                              <Hammer className="w-3 h-3" /> AUTO-CRANE
+                              <Hammer className="w-3 h-3" /> EFISIENSI {player.budgetBlocksRemaining}
                             </span>
                           )}
-                          {(player.doubleFundsUntil || 0) > Date.now() && (
+                          {player.hasBLT && (
                             <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-950 text-amber-400 border border-amber-800 font-bold flex items-center gap-1">
-                              <Zap className="w-3 h-3" /> 2x UPETI
+                              <Zap className="w-3 h-3" /> BLT
                             </span>
                           )}
                         </div>

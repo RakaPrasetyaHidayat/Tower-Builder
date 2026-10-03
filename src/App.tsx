@@ -1,15 +1,28 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { Room } from "colyseus.js";
-import { createGameRoom, joinGameRoom, reconnectGameRoom } from "./services/colyseus";
+import { createGameRoom, generateClientRoomCode, joinGameRoom, reconnectGameRoom } from "./services/colyseus";
 import type { GameStateData, BlockPlacePayload, CardOption, CardType, DbSavedPayload, GameMode, Question, QuestionResult } from "./types/game";
 import { Lobby } from "./components/Lobby";
 import { AdminDashboard } from "./components/AdminDashboard";
 import { PlayerView } from "./components/PlayerView";
 import { CardChoiceModal } from "./components/CardChoiceModal";
 import { MatchSummaryModal } from "./components/Leaderboard";
+import type { CustomQuestion } from "./components/QuestionManager";
+
+// Bersihkan URL ?room= param tanpa reload
+function consumeUrlRoomParam(): string | null {
+  const urlParams = new URLSearchParams(window.location.search);
+  const urlRoom = urlParams.get("room");
+  if (urlRoom) {
+    // Hapus param dari URL agar tidak re-trigger reconnect pada refresh berikutnya
+    urlParams.delete("room");
+    const newSearch = urlParams.toString();
+    window.history.replaceState(null, "", newSearch ? `?${newSearch}` : window.location.pathname);
+  }
+  return urlRoom?.toUpperCase() || null;
+}
 
 // Cek apakah ada session tersimpan sebelum render pertama
-// Cek sessionStorage DAN URL ?room= param
 function hasSavedSession(): boolean {
   const hasStorage = !!(
     sessionStorage.getItem("tb_room_code") &&
@@ -22,6 +35,14 @@ function hasSavedSession(): boolean {
   return hasStorage || hasUrlRoom;
 }
 
+function clearSessionStorage() {
+  sessionStorage.removeItem("tb_room_code");
+  sessionStorage.removeItem("tb_nickname");
+  sessionStorage.removeItem("tb_reconnect_token");
+  sessionStorage.removeItem("tb_role");
+  sessionStorage.removeItem("tb_gm_view_mode");
+}
+
 export function App() {
   const [room, setRoom] = useState<Room<any> | null>(null);
   const [gameState, setGameState] = useState<GameStateData | null>(null);
@@ -31,6 +52,7 @@ export function App() {
 
   const [roundId, setRoundId] = useState<number>(1);
   const [cardChoices, setCardChoices] = useState<CardOption[] | null>(null);
+  const [autoPlaceRequest, setAutoPlaceRequest] = useState(0);
   const [showSummary, setShowSummary] = useState<boolean>(false);
   const [feedNotification, setFeedNotification] = useState<string | null>(null);
   const [dbSavedInfo, setDbSavedInfo] = useState<DbSavedPayload | null>(null);
@@ -39,11 +61,19 @@ export function App() {
   // Question Building state
   const [currentQuestion, setCurrentQuestion] = useState<Question | null>(null);
   const [questionResult, setQuestionResult] = useState<QuestionResult | null>(null);
+  const [customQuestions, setCustomQuestions] = useState<CustomQuestion[]>([]);
+  const [customQuestionsSaved, setCustomQuestionsSaved] = useState(false);
 
   // Ref ke room aktif — dipakai di cleanup tanpa menyebabkan re-render
   const roomRef = useRef<Room<any> | null>(null);
+  const restoreStartedRef = useRef(false);
   // Flag agar onLeave tidak clear state saat kita sendiri yang keluar
   const isLeavingRef = useRef(false);
+
+  const changeGmViewMode = (mode: "play" | "dashboard") => {
+    sessionStorage.setItem("tb_gm_view_mode", mode);
+    setGmViewMode(mode);
+  };
 
   const setupRoomListeners = useCallback((activeRoom: Room<any>) => {
     const syncState = (state: any) => {
@@ -72,8 +102,8 @@ export function App() {
                 lastPlacedAt: player.lastPlacedAt ?? 0,
                 isFrozen: Boolean(player.isFrozen),
                 frozenUntil: player.frozenUntil ?? 0,
-                doubleFundsUntil: player.doubleFundsUntil ?? 0,
-                hasAutoCrane: Boolean(player.hasAutoCrane),
+                budgetBlocksRemaining: player.budgetBlocksRemaining ?? 0,
+                hasBLT: Boolean(player.hasBLT),
               };
             }
           });
@@ -93,8 +123,8 @@ export function App() {
                 lastPlacedAt: player.lastPlacedAt ?? 0,
                 isFrozen: Boolean(player.isFrozen),
                 frozenUntil: player.frozenUntil ?? 0,
-                doubleFundsUntil: player.doubleFundsUntil ?? 0,
-                hasAutoCrane: Boolean(player.hasAutoCrane),
+                budgetBlocksRemaining: player.budgetBlocksRemaining ?? 0,
+                hasBLT: Boolean(player.hasBLT),
               };
             }
           });
@@ -125,6 +155,15 @@ export function App() {
 
     activeRoom.onMessage("trigger_card_choice", (data: { options: CardOption[] }) => {
       setCardChoices(data.options);
+    });
+    activeRoom.onMessage("custom_questions", (data: { questions: CustomQuestion[] }) => {
+      setCustomQuestions(data.questions);
+      setCustomQuestionsSaved(true);
+    });
+    activeRoom.onMessage("card_applied", (data: { cardType: CardType }) => {
+      if (data.cardType === "LIQUID_BUDGET") {
+        setAutoPlaceRequest((request) => request + 1);
+      }
     });
     activeRoom.onMessage("feed_notification", (data: { message: string }) => {
       setFeedNotification(data.message);
@@ -165,14 +204,11 @@ export function App() {
         setTimeout(() => setQuestionResult(null), 3000);
       }
     });
+    activeRoom.send("get_custom_questions");
 
     // Koneksi putus dari luar (bukan karena kita yang keluar)
-    activeRoom.onLeave(() => {
+    activeRoom.onLeave((code) => {
       if (isLeavingRef.current) return;
-      sessionStorage.removeItem("tb_room_code");
-      sessionStorage.removeItem("tb_nickname");
-      sessionStorage.removeItem("tb_reconnect_token");
-      sessionStorage.removeItem("tb_role");
       roomRef.current = null;
       setRoom(null);
       setGameState(null);
@@ -180,6 +216,7 @@ export function App() {
       setCardChoices(null);
       setShowSummary(false);
       setDbSavedInfo(null);
+      setError(`Koneksi sayembara terputus (${code}). Muat ulang halaman untuk mencoba menyambung kembali.`);
     });
 
     activeRoom.onError((code, message) => {
@@ -190,9 +227,11 @@ export function App() {
 
   // ── Reconnect saat refresh ──────────────────────────────────────────────
   useEffect(() => {
-    // Baca juga dari URL query param ?room=XXXX (untuk kasus join via link)
-    const urlParams = new URLSearchParams(window.location.search);
-    const urlRoomCode = urlParams.get("room")?.toUpperCase() || null;
+    if (restoreStartedRef.current) return;
+    restoreStartedRef.current = true;
+
+    // Konsumsi URL ?room= param (hapus dari URL agar tidak loop pada refresh berikutnya)
+    const urlRoomCode = consumeUrlRoomParam();
 
     const savedRoomCode = sessionStorage.getItem("tb_room_code") || urlRoomCode;
     const savedNickname = sessionStorage.getItem("tb_nickname");
@@ -207,8 +246,6 @@ export function App() {
 
     // Sudah ada room aktif → skip
     if (roomRef.current) return;
-
-    let cancelled = false;
 
     const restoreSession = async () => {
       try {
@@ -232,27 +269,22 @@ export function App() {
           }
         }
 
-        if (cancelled) {
-          try { activeRoom?.leave(); } catch { /* noop */ }
-          return;
-        }
-
         if (!activeRoom) {
-          // Tidak bisa reconnect sama sekali → bersihkan session dan tampilkan lobby
-          sessionStorage.removeItem("tb_room_code");
-          sessionStorage.removeItem("tb_nickname");
-          sessionStorage.removeItem("tb_reconnect_token");
-          sessionStorage.removeItem("tb_role");
+          // Bersihkan session agar refresh berikutnya tidak loop reconnect
+          clearSessionStorage();
+          setError("Sesi sayembara sudah berakhir. Buat atau bergabung ke sayembara baru.");
           setIsLoading(false);
           return;
         }
 
         // Simpan token baru
         sessionStorage.setItem("tb_reconnect_token", activeRoom.reconnectionToken || "");
+        setError(null);
 
         // Restore tampilan sesuai role
         if (savedRole === "GAME_MASTER") {
-          setGmViewMode("dashboard");
+          const savedViewMode = sessionStorage.getItem("tb_gm_view_mode");
+          changeGmViewMode(savedViewMode === "play" ? "play" : "dashboard");
         } else {
           setGmViewMode("play");
         }
@@ -261,20 +293,15 @@ export function App() {
         setRoom(activeRoom);
         setupRoomListeners(activeRoom);
       } catch {
-        if (!cancelled) {
-          sessionStorage.removeItem("tb_room_code");
-          sessionStorage.removeItem("tb_nickname");
-          sessionStorage.removeItem("tb_reconnect_token");
-          sessionStorage.removeItem("tb_role");
-        }
+        // Bersihkan session agar refresh berikutnya tidak loop reconnect
+        clearSessionStorage();
+        setError("Terjadi kendala saat menyambung kembali. Periksa koneksi lalu coba muat ulang lagi.");
       } finally {
-        if (!cancelled) setIsLoading(false);
+        setIsLoading(false);
       }
     };
 
     restoreSession();
-
-    return () => { cancelled = true; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []); // Hanya run sekali saat mount
 
@@ -282,21 +309,26 @@ export function App() {
   const handleCreate = async (nickname: string) => {
     setIsLoading(true);
     setError(null);
+    const roomCode = generateClientRoomCode();
+    sessionStorage.setItem("tb_room_code", roomCode);
+    sessionStorage.setItem("tb_nickname", nickname);
+    sessionStorage.setItem("tb_role", "GAME_MASTER");
+    sessionStorage.setItem("tb_gm_view_mode", "dashboard");
     try {
-      const newRoom = await createGameRoom(nickname);
+      const newRoom = await createGameRoom(nickname, roomCode);
 
       // Simpan SEMUA data yang dibutuhkan untuk reconnect SEBELUM setup listeners
       // agar syncState pertama sudah punya nickname
-      sessionStorage.setItem("tb_nickname", nickname);
       sessionStorage.setItem("tb_reconnect_token", newRoom.reconnectionToken || "");
-      sessionStorage.setItem("tb_role", "GAME_MASTER");
+      sessionStorage.setItem("tb_room_code", newRoom.state?.roomCode || roomCode);
 
-      setGmViewMode("dashboard");
+      changeGmViewMode("dashboard");
       roomRef.current = newRoom;
       setRoom(newRoom);
       setupRoomListeners(newRoom);
       // roomCode akan disimpan otomatis saat syncState pertama masuk dari server
     } catch (err: any) {
+      clearSessionStorage();
       setError(err?.message || "Gagal membuat room. Pastikan server Colyseus berjalan di port 2567.");
     } finally {
       setIsLoading(false);
@@ -307,17 +339,20 @@ export function App() {
   const handleJoin = async (roomCode: string, nickname: string) => {
     setIsLoading(true);
     setError(null);
+    sessionStorage.setItem("tb_room_code", roomCode.toUpperCase());
+    sessionStorage.setItem("tb_nickname", nickname);
+    sessionStorage.setItem("tb_role", "PLAYER");
     try {
       const joinedRoom = await joinGameRoom(roomCode, nickname);
       sessionStorage.setItem("tb_room_code", roomCode.toUpperCase());
-      sessionStorage.setItem("tb_nickname", nickname);
       sessionStorage.setItem("tb_reconnect_token", joinedRoom.reconnectionToken || "");
-      sessionStorage.setItem("tb_role", "PLAYER");
+      sessionStorage.removeItem("tb_gm_view_mode");
       setGmViewMode("play");
       roomRef.current = joinedRoom;
       setRoom(joinedRoom);
       setupRoomListeners(joinedRoom);
     } catch (err: any) {
+      clearSessionStorage();
       setError(err?.message || "Gagal bergabung. Pastikan kode room 6 digit benar.");
     } finally {
       setIsLoading(false);
@@ -328,10 +363,7 @@ export function App() {
   const handleLeave = () => {
     isLeavingRef.current = true;
 
-    sessionStorage.removeItem("tb_room_code");
-    sessionStorage.removeItem("tb_nickname");
-    sessionStorage.removeItem("tb_reconnect_token");
-    sessionStorage.removeItem("tb_role");
+    clearSessionStorage();
 
     const currentRoom = roomRef.current;
     roomRef.current = null;
@@ -377,6 +409,14 @@ export function App() {
 
   const handleSetGameMode = (mode: GameMode) =>
     room?.send("admin_action", { action: "set_game_mode", gameMode: mode });
+
+  const handleSaveCustomQuestions = (questions: CustomQuestion[]) =>
+    room?.send("set_custom_questions", { questions });
+
+  const handleCustomQuestionsChange = (questions: CustomQuestion[]) => {
+    setCustomQuestions(questions);
+    setCustomQuestionsSaved(false);
+  };
 
   const handleAnswerQuestion = (questionId: number, answerIndex: number) =>
     room?.send("answer_question", { questionId, answerIndex });
@@ -494,7 +534,11 @@ export function App() {
           onForceFinish={handleForceFinish}
           onAddBots={handleAddBots}
           onSetGameMode={handleSetGameMode}
-          onSwitchToPlay={() => setGmViewMode("play")}
+          customQuestions={customQuestions}
+          customQuestionsSaved={customQuestionsSaved}
+          onCustomQuestionsChange={handleCustomQuestionsChange}
+          onSetCustomQuestions={handleSaveCustomQuestions}
+          onSwitchToPlay={() => changeGmViewMode("play")}
           onLeave={handleLeave}
         />
       ) : (
@@ -502,6 +546,7 @@ export function App() {
           key={roundId}
           state={gameState}
           sessionId={mySessionId}
+          autoPlaceRequest={autoPlaceRequest}
           isGameMaster={isGameMaster}
           onPlaceBlock={handlePlaceBlock}
           onLeave={handleLeave}
@@ -511,7 +556,7 @@ export function App() {
           onSetMultiplier={handleSetMultiplier}
           onForceFinish={handleForceFinish}
           onAddBots={handleAddBots}
-          onSwitchToDashboard={isGameMaster ? () => setGmViewMode("dashboard") : undefined}
+          onSwitchToDashboard={isGameMaster ? () => changeGmViewMode("dashboard") : undefined}
           currentQuestion={currentQuestion}
           questionResult={questionResult}
           onAnswerQuestion={handleAnswerQuestion}

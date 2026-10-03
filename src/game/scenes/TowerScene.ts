@@ -33,7 +33,7 @@ export class TowerScene extends Phaser.Scene {
   private blockWidth = 170;
   private blockHeight = 46;
   private ropeLength = 190;
-  private readonly MAX_TILT = 30;
+  private readonly MAX_TILT = 25;
 
   // Pendulum
   private anchorX = 200;
@@ -60,6 +60,8 @@ export class TowerScene extends Phaser.Scene {
   private isGameActive = true;
   private isPaused = false;
   private isFrozen = false;
+  private autoBlocksQueued = 0;
+  private isAutoPlacing = false;
 
   constructor() {
     super({ key: "TowerScene" });
@@ -156,8 +158,7 @@ export class TowerScene extends Phaser.Scene {
 
     const dt = Math.min(delta / 1000, 0.05);
 
-    // Pendulum selalu bergerak (visual preview) kecuali saat beku
-    // Hanya drop yang dicegah saat paused/tidak aktif
+    // Pendulum swing — bergerak saat tidak drop dan tidak frozen
     if (!this.isDropping && this.swingingBlock && !this.isFrozen) {
       this.swingTime += dt * this.pendulumOmega;
       this.pendulumAngle = Math.sin(this.swingTime) * this.pendulumThetaMax;
@@ -186,13 +187,14 @@ export class TowerScene extends Phaser.Scene {
       }
     }
 
-    // Dropping physics — hanya berjalan saat game aktif dan tidak paused
-    if (this.isDropping && this.swingingBlock && this.isGameActive && !this.isPaused) {
+    // Dropping physics — hanya berjalan saat game aktif dan tidak paused/frozen
+    if (this.isDropping && this.swingingBlock && this.isGameActive && !this.isPaused && !this.isFrozen) {
       this.dropVy += 980 * dt;
       this.swingingBlock.y += this.dropVy * dt;
       this.swingingBlock.x += this.dropVx * dt;
 
       const top = this.landedBlocks[this.landedBlocks.length - 1];
+      // targetY: permukaan atas blok teratas (flat — rotasi hanya visual)
       const targetY = top.y - this.blockHeight;
 
       if (this.swingingBlock.y >= targetY) {
@@ -206,10 +208,113 @@ export class TowerScene extends Phaser.Scene {
     this.handleRelease();
   }
 
+  public autoPlaceBlocks(count: number) {
+    if (!this.isGameActive || this.isCollapsed) return;
+    this.autoBlocksQueued += Math.max(0, Math.floor(count));
+    if (this.isAutoPlacing || this.autoBlocksQueued === 0) return;
+    this.isAutoPlacing = true;
+
+    const placeNext = () => {
+      if (this.autoBlocksQueued <= 0 || this.isCollapsed || !this.isGameActive) {
+        this.isAutoPlacing = false;
+        return;
+      }
+      if (this.isPaused || this.isFrozen) {
+        this.time.delayedCall(250, placeNext);
+        return;
+      }
+      const topBlock = this.landedBlocks[this.landedBlocks.length - 1];
+      if (!topBlock) {
+        this.isAutoPlacing = false;
+        return;
+      }
+
+      this.swingingBlock?.destroy();
+      this.swingingBlock = null;
+      const landY = topBlock.y - this.blockHeight;
+      const block = this.createTowerFloor(
+        topBlock.x,
+        landY,
+        this.blockWidth,
+        this.blockHeight,
+        this.currentHeight % TOWER_FLOOR_THEMES.length,
+        false
+      );
+      this.landedBlocks.push({ container: block, x: topBlock.x, y: landY, rotation: topBlock.rotation });
+      this.currentHeight += 1;
+      this.autoBlocksQueued -= 1;
+
+      this.configData.onDropBlock?.({
+        precision: 100,
+        offsetRatio: 0,
+        tiltAngle: 0,
+        currentHeight: this.currentHeight,
+        tiltSum: this.currentTiltSum,
+        perfect: true,
+        isAlive: true,
+      });
+
+      this.panCameraAndSpawn();
+      if (this.autoBlocksQueued > 0) this.time.delayedCall(360, placeNext);
+      else this.isAutoPlacing = false;
+    };
+
+    this.time.delayedCall(320, placeNext);
+  }
+
+  public syncTowerHeight(height: number) {
+    const safeHeight = Math.max(0, Math.floor(height));
+    if (safeHeight === this.currentHeight) return;
+
+    while (this.currentHeight > safeHeight && this.landedBlocks.length > 1) {
+      this.landedBlocks.pop()?.container.destroy();
+      this.currentHeight -= 1;
+    }
+    while (this.currentHeight < safeHeight) {
+      const topBlock = this.landedBlocks[this.landedBlocks.length - 1];
+      if (!topBlock) return;
+      const floorY = topBlock.y - this.blockHeight;
+      const floor = this.createTowerFloor(
+        topBlock.x,
+        floorY,
+        this.blockWidth,
+        this.blockHeight,
+        this.currentHeight % TOWER_FLOOR_THEMES.length,
+        false
+      );
+      this.landedBlocks.push({ container: floor, x: topBlock.x, y: floorY, rotation: topBlock.rotation });
+      this.currentHeight += 1;
+    }
+
+    // Hancurkan blok pendulum yang sedang swing — akan di-spawn ulang di bawah
+    if (this.swingingBlock) {
+      this.swingingBlock.destroy();
+      this.swingingBlock = null;
+    }
+    this.isDropping = false;
+    this.dropVy = 0;
+    this.dropVx = 0;
+    // JANGAN reset currentTiltSum di sini — ini hanya sync visual height dari server
+    // currentTiltSum harus tetap akumulatif selama sesi game berlangsung
+    const scrollY = Math.max(0, (this.currentHeight - 2.5) * this.blockHeight);
+    this.anchorY = this.scale.height * 0.22 - this.currentHeight * this.blockHeight;
+    this.cameras.main.centerOn(this.scale.width / 2, (this.scale.height / 2) - scrollY);
+    // Hanya spawn blok baru jika game aktif
+    if (this.isGameActive) {
+      this.spawnSwingingBlock();
+    }
+  }
+
+  // Reset tiltSum — hanya dipanggil eksplisit saat game reset/baru mulai
+  public resetTiltSum() {
+    this.currentTiltSum = 0;
+    this.isCollapsed = false;
+  }
+
   private handleRelease() {
-    // Izinkan drop hanya saat game aktif dan tidak paused/frozen
-    if (this.isDropping || this.isCollapsed || this.isFrozen || !this.swingingBlock) return;
-    if (!this.isGameActive || this.isPaused) return;
+    // Izinkan drop hanya saat game aktif, tidak paused, tidak frozen
+    if (this.isDropping || this.isCollapsed || !this.swingingBlock) return;
+    if (!this.isGameActive || this.isPaused || this.isFrozen) return;
 
     try { navigator?.vibrate?.(25); } catch (_) { /* noop */ }
 
@@ -242,12 +347,24 @@ export class TowerScene extends Phaser.Scene {
     const precision = Math.max(0, Math.round(100 - Math.abs(ratio) * 100));
     const perfect = Math.abs(ratio) < 0.08;
 
-    const tilt = perfect ? 0 : ratio * 5.2;
-    this.currentTiltSum += tilt;
+    // tilt dalam derajat, akumulasi per blok
+    // Base tilt dari posisi jatuh
+    const baseTilt = perfect ? 0 : ratio * 6.5;
+    // Gravitational amplification: semakin miring tower, semakin besar pengaruh tiap blok baru
+    // Ini mensimulasikan pusat massa yang bergeser
+    const tiltFactor = 1 + Math.abs(this.currentTiltSum) / this.MAX_TILT;
+    const tiltDelta = baseTilt * tiltFactor;
 
-    // Clamp tilt sum display
-    const clampedTilt = Math.max(-this.MAX_TILT, Math.min(this.MAX_TILT, this.currentTiltSum));
-    this.swingingBlock.setRotation(Phaser.Math.DegToRad(clampedTilt));
+    // Passive gravity tilt: tower yang sudah miring terus bertambah miring
+    // karena pusat gravitasi bergeser (bahkan blok sempurna tidak menghentikannya sepenuhnya)
+    const gravityTilt = (this.currentTiltSum / this.MAX_TILT) * 0.8;
+
+    this.currentTiltSum += tiltDelta + gravityTilt;
+
+    // Clamp visual display (derajat)
+    const clampedDeg = Math.max(-this.MAX_TILT, Math.min(this.MAX_TILT, this.currentTiltSum));
+    const clampedRad = Phaser.Math.DegToRad(clampedDeg);
+    this.swingingBlock.setRotation(clampedRad);
 
     // Small bounce tween to make landing feel physical
     this.tweens.add({
@@ -267,26 +384,26 @@ export class TowerScene extends Phaser.Scene {
       container: this.swingingBlock,
       x: bx,
       y: landY,
-      rotation: Phaser.Math.DegToRad(clampedTilt),
+      rotation: clampedRad, // simpan dalam radian (konsisten dengan Phaser)
     });
 
     this.swingingBlock = null;
-
     this.currentHeight += 1;
 
-    this.showFeedback(bx, landY - 24, perfect, tilt);
+    this.showFeedback(bx, landY - 24, perfect, tiltDelta);
 
     this.configData.onDropBlock?.({
       precision,
       offsetRatio: ratio,
-      tiltAngle: tilt,
+      tiltAngle: tiltDelta,
       currentHeight: this.currentHeight,
       tiltSum: this.currentTiltSum,
       perfect,
       isAlive: true,
     });
 
-    // Collapse check
+    // Collapse check — gunakan nilai absolut currentTiltSum (derajat)
+    // Juga collapse jika kemiringan visual sudah di batas maksimum DAN masih bertambah
     if (Math.abs(this.currentTiltSum) >= this.MAX_TILT) {
       this.triggerCollapse();
       return;
@@ -364,9 +481,12 @@ export class TowerScene extends Phaser.Scene {
   private spawnSwingingBlock() {
     if (this.isCollapsed || !this.isGameActive) return;
 
+    // Pastikan state drop bersih setiap spawn blok baru
     this.isDropping = false;
     this.dropVy = 0;
     this.dropVx = 0;
+    // Reset swing time agar ayunan mulai smooth dari tengah
+    this.swingTime = 0;
 
     const idx = this.currentHeight % TOWER_FLOOR_THEMES.length;
     this.swingingBlock = this.createTowerFloor(
@@ -661,5 +781,6 @@ export class TowerScene extends Phaser.Scene {
   // ─── PUBLIC API ───────────────────────────────────────────────
   public setPauseState(paused: boolean) { this.isPaused = paused; }
   public setFrozenState(frozen: boolean) { this.isFrozen = frozen; }
+  public setGameActive(active: boolean) { this.isGameActive = active; }
   public resetScene() { this.scene.restart(); }
 }

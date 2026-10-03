@@ -105,7 +105,7 @@ export const QuestionManager: React.FC<QuestionManagerProps> = ({
 
       {/* Info */}
       <div className="text-[11px] text-slate-500 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2 leading-relaxed">
-        Buat soal kustom. Jika tidak ada soal, bank soal default dipakai. Soal akan diacak saat game mulai.
+        Hanya soal yang dibuat dan disimpan Sultan yang digunakan. Tidak ada soal otomatis atau bank soal bawaan.
       </div>
 
       {/* Daftar soal */}
@@ -252,11 +252,11 @@ export const QuestionManager: React.FC<QuestionManagerProps> = ({
           <button
             type="button"
             onClick={handleSave}
-            disabled={questions.length === 0 || validCount !== questions.length}
+            disabled={validCount !== questions.length}
             className={`flex-1 py-2 rounded-xl text-xs font-black transition-all flex items-center justify-center gap-1.5 cursor-pointer active:scale-95 ${
               savedFeedback
                 ? "bg-emerald-500 text-white border border-emerald-400"
-                : questions.length === 0 || validCount !== questions.length
+                : validCount !== questions.length
                 ? "bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed"
                 : "bg-indigo-600 text-white border border-indigo-500 hover:bg-indigo-500"
             }`}

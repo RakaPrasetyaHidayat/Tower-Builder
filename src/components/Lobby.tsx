@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Crown,
   Landmark,
@@ -9,7 +9,6 @@ import {
   Shield,
   Hammer,
   Trophy,
-  Database,
   X,
 } from "lucide-react";
 import { getApiBaseUrl } from "../services/colyseus";
@@ -45,17 +44,6 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [showGlobalModal, setShowGlobalModal] = useState(false);
   const [globalRecords, setGlobalRecords] = useState<any[]>([]);
   const [loadingRecords, setLoadingRecords] = useState(false);
-  const [dbStatus, setDbStatus] = useState<"checking" | "connected" | "error">("checking");
-
-  useEffect(() => {
-    fetch(`${getApiBaseUrl()}/api/db/health`)
-      .then((r) => r.json())
-      .then((data) => {
-        if (data.status === "connected") setDbStatus("connected");
-        else setDbStatus("error");
-      })
-      .catch(() => setDbStatus("error"));
-  }, []);
 
   const openGlobalLeaderboard = () => {
     setShowGlobalModal(true);
@@ -117,21 +105,6 @@ export const Lobby: React.FC<LobbyProps> = ({
             Game Tumpuk Warisan Budaya • 30 Pemain + 1 Sultan
           </p>
 
-          {/* Database indicator pill */}
-          <div className="mt-2.5 inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/80 border border-slate-200 text-[11px] shadow-sm">
-            <Database className="w-3.5 h-3.5 text-amber-600" />
-            <span className="text-slate-600">Database Neon:</span>
-            {dbStatus === "connected" ? (
-              <span className="text-emerald-600 font-bold flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-                Terhubung
-              </span>
-            ) : dbStatus === "checking" ? (
-              <span className="text-amber-600">Menghubungkan...</span>
-            ) : (
-              <span className="text-rose-500">Offline</span>
-            )}
-          </div>
         </div>
 
         {/* Card Frame with Clean Royal Parchment Aesthetic */}
@@ -201,7 +174,7 @@ export const Lobby: React.FC<LobbyProps> = ({
                 <div>
                   <div className="font-black text-amber-900">Tahta Sultan & Arena Pembangun</div>
                   <div className="text-[11px] text-amber-800/90 mt-0.5">
-                    Sultan dapat bermain langsung menyusun candi, menguji bot AI, mengatur multiplier upeti, serta menyimpan hasil ke Neon PostgreSQL.
+                    Sultan dapat ikut bermain, mengatur multiplier upeti, dan melihat hasil pertandingan.
                   </div>
                 </div>
               </div>

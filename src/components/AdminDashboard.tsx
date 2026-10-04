@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import type { GameStateData, PlayerData, DbSavedPayload, GameMode } from "../types/game";
-import { getApiBaseUrl } from "../services/colyseus";
 import { QuestionManager, type CustomQuestion } from "./QuestionManager";
 import {
   Crown, Play, Pause, RotateCcw, Users, Copy, Check, Clock,
-  Landmark, Snowflake, Shield, Bot, Gamepad2, Database, Flame,
+  Landmark, Snowflake, Shield, Gamepad2, Flame,
   CheckCircle2, Hammer, Zap, Zap as ZapIcon, Brain,
 } from "lucide-react";
 
@@ -17,8 +16,6 @@ interface AdminDashboardProps {
   onSetMultiplier: (multiplier: number) => void;
   onFreezePlayer: (targetSessionId: string) => void;
   onResetGame: () => void;
-  onForceFinish?: () => void;
-  onAddBots?: () => void;
   onSetGameMode?: (mode: GameMode) => void;
   customQuestions: CustomQuestion[];
   customQuestionsSaved: boolean;
@@ -37,8 +34,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onSetMultiplier,
   onFreezePlayer,
   onResetGame,
-  onForceFinish,
-  onAddBots,
   onSetGameMode,
   customQuestions,
   customQuestionsSaved,
@@ -49,24 +44,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
-  const [dbStatus, setDbStatus] = useState<"checking" | "connected" | "error">("checking");
-  const [dbDetails, setDbDetails] = useState<{ users: number; matches: number } | null>(null);
   // Game duration selector (in seconds)
   const [gameDuration, setGameDuration] = useState<number>(180);
-
-  useEffect(() => {
-    fetch(`${getApiBaseUrl()}/api/db/health`)
-      .then((res) => res.json())
-      .then((data) => {
-        if (data.status === "connected") {
-          setDbStatus("connected");
-          setDbDetails({ users: data.users ?? 0, matches: data.matches ?? 0 });
-        } else {
-          setDbStatus("error");
-        }
-      })
-      .catch(() => setDbStatus("error"));
-  }, []);
 
   const copyCode = () => {
     if (!state.roomCode) return;
@@ -87,7 +66,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const playersList: PlayerData[] = Object.values(state.players || {});
   playersList.sort((a, b) => b.score - a.score || b.towerHeight - a.towerHeight);
 
-  const totalPlayers = playersList.length;
   const nonGMPlayers = playersList.filter((p) => p.role !== "GAME_MASTER").length;
   const alivePlayers = playersList.filter((p) => p.isAlive && p.role !== "GAME_MASTER").length;
   const hasValidCustomQuestions = customQuestions.length > 0 && customQuestions.every((question) =>
@@ -129,43 +107,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
 
-        {/* Database & Room Code Banner */}
+        {/* Dashboard actions */}
         <div className="flex flex-wrap items-center gap-2.5 w-full md:w-auto justify-between md:justify-end">
-          {/* Neon DB Status Badge */}
-          <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-white border border-slate-200 text-xs shadow-sm">
-            <Database className="w-3.5 h-3.5 text-amber-600" />
-            <span className="text-[11px] text-slate-600">Neon DB:</span>
-            {dbStatus === "connected" ? (
-              <span className="text-emerald-600 font-bold flex items-center gap-1">
-                <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping inline-block" />
-                Terhubung ({dbDetails?.matches ?? 0} Match)
-              </span>
-            ) : dbStatus === "checking" ? (
-              <span className="text-amber-600 animate-pulse">Memeriksa...</span>
-            ) : (
-              <span className="text-rose-500">Offline</span>
-            )}
-          </div>
-
-          {/* 6-Digit Room Code Box */}
-          <div className="flex items-center gap-2 bg-white border-2 border-blue-400 px-3 py-1.5 rounded-xl shadow-sm">
-            <div className="text-left">
-              <div className="text-[9px] text-slate-500 uppercase font-black">KODE SAYEMBARA</div>
-              <div className="text-base sm:text-lg font-mono font-black text-blue-700">
-                {state.roomCode || "MEMBUAT..."}
-              </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={copyCode}
-              className="p-1.5 rounded-lg bg-blue-100 hover:bg-blue-200 text-blue-700 border border-blue-300 transition-all cursor-pointer"
-              title="Salin Kode 6-Digit"
-            >
-              {copiedCode ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
-            </button>
-          </div>
-
           {/* Play as Sultan Quick Switch Button */}
           {onSwitchToPlay && (
             <button
@@ -382,24 +325,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     Simpan perubahan soal sebelum memulai.
                   </p>
                 )}
-                {totalPlayers <= 1 && (
-                  <p className="text-[11px] text-amber-600/70 text-center">
-                    💡 Anda bisa mulai uji coba sendiri atau tekan tombol Tambah Bot di bawah!
-                  </p>
-                )}
               </div>
-            )}
-
-            {/* Simulation Bot Button */}
-            {onAddBots && state.status !== "FINISHED" && (
-              <button
-                type="button"
-                onClick={onAddBots}
-                className="w-full py-2.5 px-3 rounded-2xl font-bold text-xs text-amber-900 bg-amber-50 border border-amber-300 hover:bg-amber-100 transition-all flex items-center justify-center gap-2 cursor-pointer active:scale-95"
-              >
-                <Bot className="w-4 h-4 text-amber-700" />
-                <span>Tambah 5 Empu AI (Simulasi Bot)</span>
-              </button>
             )}
 
             {(state.status === "PLAYING" || state.status === "PAUSED") && (
@@ -435,17 +361,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </button>
                 </div>
 
-                {/* Instant Force Finish & Save to Neon DB button */}
-                {onForceFinish && (
-                  <button
-                    type="button"
-                    onClick={onForceFinish}
-                    className="w-full py-2.5 px-3 rounded-2xl font-black text-xs text-stone-950 bg-gradient-to-r from-emerald-400 to-teal-400 hover:from-emerald-300 hover:to-teal-300 active:scale-[0.98] transition-all flex items-center justify-center gap-1.5 cursor-pointer shadow-md shadow-emerald-500/20"
-                  >
-                    <Database className="w-3.5 h-3.5" />
-                    <span>Selesaikan Babak & Simpan ke Neon DB</span>
-                  </button>
-                )}
               </div>
             )}
 
@@ -566,9 +481,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="h-48 flex flex-col items-center justify-center text-center">
                 <Users className="w-10 h-10 mb-2 text-amber-300 opacity-50 animate-pulse" />
                 <p className="text-sm font-bold text-slate-700">Menunggu Empu Bergabung...</p>
-                <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                  Tekan "Tambah 5 Empu AI" di menu kiri untuk menguji multiplayer secara instan!
-                </p>
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">

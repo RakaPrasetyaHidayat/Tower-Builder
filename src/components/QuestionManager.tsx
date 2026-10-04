@@ -1,5 +1,5 @@
-import React, { useState } from "react";
-import { Brain, Plus, Trash2, CheckCircle2, AlertCircle, GripVertical, ChevronDown, ChevronUp } from "lucide-react";
+import React, { useRef, useState } from "react";
+import { Brain, Plus, Trash2, CheckCircle2, AlertCircle, GripVertical, ChevronDown, ChevronUp, FileUp } from "lucide-react";
 
 export interface CustomQuestion {
   id: number;
@@ -32,6 +32,10 @@ export const QuestionManager: React.FC<QuestionManagerProps> = ({
 }) => {
   const [expandedIdx, setExpandedIdx] = useState<number | null>(questions.length === 0 ? 0 : null);
   const [savedFeedback, setSavedFeedback] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importFeedback, setImportFeedback] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const addQuestion = () => {
     const newQ = EMPTY_QUESTION();
@@ -75,6 +79,45 @@ export const QuestionManager: React.FC<QuestionManagerProps> = ({
     setTimeout(() => setSavedFeedback(false), 2500);
   };
 
+  const handleImportFile = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    setImporting(true);
+    setImportError(null);
+    setImportFeedback(null);
+    try {
+      if (file.size > 15 * 1024 * 1024) {
+        throw new Error("Ukuran file maksimal 15 MB.");
+      }
+      if (questions.length >= 500) {
+        throw new Error("Batas bank soal adalah 500 pertanyaan.");
+      }
+
+      const { extractQuestionDocument } = await import("./questionDocumentImport");
+      const result = await extractQuestionDocument(file);
+      const imported = result.questions.slice(0, 500 - questions.length);
+      const firstImportedIndex = questions.length;
+      const firstId = Math.max(Date.now(), ...questions.map((question) => question.id + 1));
+      const merged = [...questions, ...imported.map((question, index) => ({ ...question, id: firstId + index }))];
+      onChange(merged);
+      setExpandedIdx(firstImportedIndex);
+
+      const incompleteCount = imported.filter((question) => !question.text.trim() || question.options.some((option) => !option.trim())).length;
+      const answerNote = result.answerKeyCount < imported.length
+        ? ` ${imported.length - result.answerKeyCount} jawaban belum ditemukan; periksa pilihan benar.`
+        : "";
+      const incompleteNote = incompleteCount > 0 ? ` ${incompleteCount} soal perlu dilengkapi.` : "";
+      const limitNote = imported.length < result.questions.length ? " Impor dibatasi hingga 500 soal." : "";
+      setImportFeedback(`${imported.length} soal ditambahkan dari ${file.name}.${answerNote}${incompleteNote}${limitNote}`);
+    } catch (error) {
+      setImportError(error instanceof Error ? error.message : "File gagal dibaca.");
+    } finally {
+      setImporting(false);
+    }
+  };
+
   const validCount = questions.filter(
     (q) => q.text.trim() && q.options.every((o) => o.trim())
   ).length;
@@ -107,6 +150,30 @@ export const QuestionManager: React.FC<QuestionManagerProps> = ({
       <div className="text-[11px] text-slate-500 bg-indigo-50 border border-indigo-100 rounded-xl px-3 py-2 leading-relaxed">
         Hanya soal yang dibuat dan disimpan Sultan yang digunakan. Tidak ada soal otomatis atau bank soal bawaan.
       </div>
+
+      {!disabled && (
+        <div className="space-y-1.5">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".pdf,.docx,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            onChange={handleImportFile}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing || questions.length >= 500}
+            className="w-full py-2.5 rounded-xl text-xs font-bold text-slate-700 bg-white border border-slate-300 hover:bg-slate-50 transition-colors flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+          >
+            <FileUp className="w-4 h-4 text-indigo-600" />
+            {importing ? "Membaca dokumen..." : "Impor PDF / Word (.docx)"}
+          </button>
+          <p className="text-[10px] text-slate-500">Format soal bernomor dengan pilihan A-D; kunci jawaban opsional. PDF hasil scan tidak didukung.</p>
+          {importFeedback && <p role="status" className="text-[10px] text-emerald-700">{importFeedback}</p>}
+          {importError && <p role="alert" className="text-[10px] text-rose-600">{importError}</p>}
+        </div>
+      )}
 
       {/* Daftar soal */}
       <div className="space-y-2 max-h-80 overflow-y-auto pr-1">

@@ -16,12 +16,13 @@ interface PhaserTowerGameProps {
   isPaused: boolean;
   isFrozen: boolean;
   initialHeight?: number;
+  onDropStarted: () => void;
   onDropBlock: (data: DropBlockData) => void;
-  onTowerCollapsed: (data: { height: number; tiltSum: number }) => void;
+  onTowerCollapsed: (data: { height: number; tiltSum: number; blocksFell: number; isAlive: boolean }) => void;
 }
 
 export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGameProps>(
-  ({ isPlaying, isPaused, isFrozen, initialHeight, onDropBlock, onTowerCollapsed }, ref) => {
+  ({ isPlaying, isPaused, isFrozen, initialHeight, onDropStarted, onDropBlock, onTowerCollapsed }, ref) => {
     const containerRef = useRef<HTMLDivElement | null>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
     const sceneRef = useRef<TowerScene | null>(null);
@@ -35,10 +36,10 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
     latestFrozenRef.current = isFrozen;
 
     // Ref untuk selalu punya callback terbaru tanpa restart Phaser
-    const callbacksRef = useRef({ onDropBlock, onTowerCollapsed });
+    const callbacksRef = useRef({ onDropStarted, onDropBlock, onTowerCollapsed });
     useEffect(() => {
-      callbacksRef.current = { onDropBlock, onTowerCollapsed };
-    }, [onDropBlock, onTowerCollapsed]);
+      callbacksRef.current = { onDropStarted, onDropBlock, onTowerCollapsed };
+    }, [onDropStarted, onDropBlock, onTowerCollapsed]);
 
     useImperativeHandle(ref, () => ({
       triggerDrop: () => {
@@ -56,6 +57,7 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
       // Config scene yang akan dipakai — pakai proxy agar callback selalu fresh
       const sceneConfig: TowerSceneConfig = {
         initialHeight: initialHeight ?? 0,
+        onDropStarted: () => callbacksRef.current.onDropStarted(),
         onDropBlock: (data) => callbacksRef.current.onDropBlock(data),
         onTowerCollapsed: (data) => callbacksRef.current.onTowerCollapsed(data),
       };

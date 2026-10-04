@@ -169,6 +169,10 @@ export function App() {
       setFeedNotification(data.message);
       setTimeout(() => setFeedNotification(null), 4000);
     });
+    activeRoom.onMessage("sabotage_notification", (data: { message: string }) => {
+      setFeedNotification(data.message);
+      setTimeout(() => setFeedNotification(null), 5000);
+    });
     activeRoom.onMessage("db_saved", (data: DbSavedPayload) => {
       setDbSavedInfo(data);
       setFeedNotification(`💾 Match #${data.roomCode} sukses tersimpan ke Database Neon PostgreSQL!`);
@@ -404,9 +408,6 @@ export function App() {
     room?.send("admin_action", { action: "freeze_player", targetSessionId });
   const handleSetMultiplier = (multiplier: number) =>
     room?.send("set_multiplier", { multiplier });
-  const handleForceFinish = () => room?.send("force_finish");
-  const handleAddBots = () => room?.send("add_bots");
-
   const handleSetGameMode = (mode: GameMode) =>
     room?.send("admin_action", { action: "set_game_mode", gameMode: mode });
 
@@ -429,6 +430,9 @@ export function App() {
       perfect: payload.perfect,
       isAlive: payload.isAlive,
     });
+  const handleBlockDropStarted = () => room?.send("block_drop_started");
+  const handleBlocksFell = (data: { blocksFell: number; isAlive: boolean }) =>
+    room?.send("blocks_fell", data);
 
   const handleSelectCard = (cardType: CardType, targetSessionId?: string) => {
     room?.send("select_card", { cardType, targetSessionId });
@@ -531,8 +535,6 @@ export function App() {
           onSetMultiplier={handleSetMultiplier}
           onFreezePlayer={handleFreezePlayer}
           onResetGame={handleResetGame}
-          onForceFinish={handleForceFinish}
-          onAddBots={handleAddBots}
           onSetGameMode={handleSetGameMode}
           customQuestions={customQuestions}
           customQuestionsSaved={customQuestionsSaved}
@@ -548,14 +550,14 @@ export function App() {
           sessionId={mySessionId}
           autoPlaceRequest={autoPlaceRequest}
           isGameMaster={isGameMaster}
+          onBlockDropStarted={handleBlockDropStarted}
+          onBlocksFell={handleBlocksFell}
           onPlaceBlock={handlePlaceBlock}
           onLeave={handleLeave}
           onStart={handleStart}
           onPause={handlePause}
           onResume={handleResume}
           onSetMultiplier={handleSetMultiplier}
-          onForceFinish={handleForceFinish}
-          onAddBots={handleAddBots}
           onSwitchToDashboard={isGameMaster ? () => changeGmViewMode("dashboard") : undefined}
           currentQuestion={currentQuestion}
           questionResult={questionResult}

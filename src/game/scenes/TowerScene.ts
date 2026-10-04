@@ -12,9 +12,17 @@ export interface DropBlockData {
 
 export interface TowerSceneConfig {
   initialHeight?: number;
+  onDropStarted?: () => void;
   onDropBlock?: (data: DropBlockData) => void;
-  onTowerCollapsed?: (data: { height: number; tiltSum: number }) => void;
-  onBlockMissed?: () => void;
+  onTowerCollapsed?: (data: { height: number; tiltSum: number; blocksFell: number; isAlive: boolean }) => void;
+}
+
+export function advanceGravitySway(angle: number, velocity: number, target: number, deltaSeconds: number) {
+  const dt = Math.min(Math.max(deltaSeconds, 0), 0.05);
+  const acceleration = (target - angle) * 18 - velocity * 7;
+  const nextVelocity = Phaser.Math.Clamp(velocity + acceleration * dt, -1.8, 1.8);
+  const nextAngle = Phaser.Math.Clamp(angle + nextVelocity * dt, -0.32, 0.32);
+  return { angle: nextAngle, velocity: nextVelocity };
 }
 
 // Stone brick palette for tower floors
@@ -47,16 +55,29 @@ export class TowerScene extends Phaser.Scene {
   private swingingBlock: Phaser.GameObjects.Container | null = null;
   private ropeGraphics: Phaser.GameObjects.Graphics | null = null;
   private isDropping = false;
+  private isUnsupportedFall = false;
   private dropVy = 0;
   private dropVx = 0;
 
   // Tower
-  private landedBlocks: { container: Phaser.GameObjects.Container; x: number; y: number; rotation: number }[] = [];
+  private landedBlocks: {
+    container: Phaser.GameObjects.Container;
+    x: number;
+    y: number;
+    rotation: number;
+    width: number;
+    height: number;
+  }[] = [];
   private currentHeight = 0;
   private currentTiltSum = 0;
+  private gravitySwayAngle = 0;
+  private gravitySwayVelocity = 0;
+  private gravitySwaySupportIndex = -1;
+  private gravitySlideVelocities = new Map<number, number>();
 
   // Flags
   private isCollapsed = false;
+  private isResolvingFall = false;
   private isGameActive = true;
   private isPaused = false;
   private isFrozen = false;
@@ -89,8 +110,13 @@ export class TowerScene extends Phaser.Scene {
   init(data: TowerSceneConfig) {
     // Selalu reset game state flags
     this.currentTiltSum = 0;
+    this.gravitySwayAngle = 0;
+    this.gravitySwayVelocity = 0;
+    this.gravitySwaySupportIndex = -1;
+    this.gravitySlideVelocities.clear();
     this.isCollapsed = false;
     this.isDropping = false;
+    this.isUnsupportedFall = false;
     this.dropVy = 0;
     this.dropVx = 0;
     this.landedBlocks = [];
@@ -98,6 +124,7 @@ export class TowerScene extends Phaser.Scene {
     this.isGameActive = true;  // SELALU true saat init
     this.isPaused = false;
     this.isFrozen = false;
+    this.isResolvingFall = false;
 
     // Update configData hanya jika ada data callback yang dipass
     if (data && (data.onDropBlock || data.onTowerCollapsed || data.initialHeight !== undefined)) {
@@ -119,14 +146,28 @@ export class TowerScene extends Phaser.Scene {
     // Foundation base
     const baseY = height - 100;
     const base = this.createTowerFloor(this.anchorX, baseY, this.blockWidth + 24, this.blockHeight + 14, 0, true);
-    this.landedBlocks.push({ container: base, x: this.anchorX, y: baseY, rotation: 0 });
+    this.landedBlocks.push({
+      container: base,
+      x: this.anchorX,
+      y: baseY,
+      rotation: 0,
+      width: this.blockWidth + 24,
+      height: this.blockHeight + 14,
+    });
 
     // Restore blocks if reconnected mid-game
     if (this.currentHeight > 0) {
       for (let i = 1; i <= this.currentHeight; i++) {
         const floorY = baseY - i * this.blockHeight;
         const floor = this.createTowerFloor(this.anchorX, floorY, this.blockWidth, this.blockHeight, i % TOWER_FLOOR_THEMES.length, false);
-        this.landedBlocks.push({ container: floor, x: this.anchorX, y: floorY, rotation: 0 });
+        this.landedBlocks.push({
+          container: floor,
+          x: this.anchorX,
+          y: floorY,
+          rotation: 0,
+          width: this.blockWidth,
+          height: this.blockHeight,
+        });
       }
       // Reposition anchor above the restored tower
       this.anchorY = height * 0.22 - this.currentHeight * this.blockHeight;
@@ -159,7 +200,7 @@ export class TowerScene extends Phaser.Scene {
     const dt = Math.min(delta / 1000, 0.05);
 
     // Pendulum swing — bergerak saat tidak drop dan tidak frozen
-    if (!this.isDropping && this.swingingBlock && !this.isFrozen) {
+    if (!this.isDropping && !this.isResolvingFall && this.swingingBlock && !this.isFrozen) {
       this.swingTime += dt * this.pendulumOmega;
       this.pendulumAngle = Math.sin(this.swingTime) * this.pendulumThetaMax;
 
@@ -187,20 +228,30 @@ export class TowerScene extends Phaser.Scene {
       }
     }
 
-    // Dropping physics — hanya berjalan saat game aktif dan tidak paused/frozen
-    if (this.isDropping && this.swingingBlock && this.isGameActive && !this.isPaused && !this.isFrozen) {
+    // A released block completes its fall even if a freeze arrives mid-drop.
+    if (this.isDropping && this.swingingBlock && this.isGameActive && !this.isPaused) {
       this.dropVy += 980 * dt;
       this.swingingBlock.y += this.dropVy * dt;
       this.swingingBlock.x += this.dropVx * dt;
 
+      if (this.isUnsupportedFall) {
+        if (this.swingingBlock.y > this.scale.height + this.blockHeight * 4) {
+          this.finishUnsupportedFall();
+        }
+        return;
+      }
+
       const top = this.landedBlocks[this.landedBlocks.length - 1];
-      // targetY: permukaan atas blok teratas (flat — rotasi hanya visual)
-      const targetY = top.y - this.blockHeight;
+      const targetY = this.getContactY(top, this.swingingBlock.x, this.swingingBlock.rotation);
 
       if (this.swingingBlock.y >= targetY) {
         this.swingingBlock.y = targetY;
         this.processLanding(top);
       }
+    }
+
+    if (this.isGameActive && !this.isPaused && !this.isDropping && !this.isResolvingFall) {
+      this.updateTowerGravity(dt);
     }
   }
 
@@ -209,7 +260,7 @@ export class TowerScene extends Phaser.Scene {
   }
 
   public autoPlaceBlocks(count: number) {
-    if (!this.isGameActive || this.isCollapsed) return;
+    if (!this.isGameActive || this.isCollapsed || this.isResolvingFall) return;
     this.autoBlocksQueued += Math.max(0, Math.floor(count));
     if (this.isAutoPlacing || this.autoBlocksQueued === 0) return;
     this.isAutoPlacing = true;
@@ -231,7 +282,7 @@ export class TowerScene extends Phaser.Scene {
 
       this.swingingBlock?.destroy();
       this.swingingBlock = null;
-      const landY = topBlock.y - this.blockHeight;
+      const landY = this.getContactY(topBlock, topBlock.x, topBlock.rotation);
       const block = this.createTowerFloor(
         topBlock.x,
         landY,
@@ -240,7 +291,14 @@ export class TowerScene extends Phaser.Scene {
         this.currentHeight % TOWER_FLOOR_THEMES.length,
         false
       );
-      this.landedBlocks.push({ container: block, x: topBlock.x, y: landY, rotation: topBlock.rotation });
+      this.landedBlocks.push({
+        container: block,
+        x: topBlock.x,
+        y: landY,
+        rotation: topBlock.rotation,
+        width: this.blockWidth,
+        height: this.blockHeight,
+      });
       this.currentHeight += 1;
       this.autoBlocksQueued -= 1;
 
@@ -273,7 +331,7 @@ export class TowerScene extends Phaser.Scene {
     while (this.currentHeight < safeHeight) {
       const topBlock = this.landedBlocks[this.landedBlocks.length - 1];
       if (!topBlock) return;
-      const floorY = topBlock.y - this.blockHeight;
+      const floorY = this.getContactY(topBlock, topBlock.x, topBlock.rotation);
       const floor = this.createTowerFloor(
         topBlock.x,
         floorY,
@@ -282,7 +340,14 @@ export class TowerScene extends Phaser.Scene {
         this.currentHeight % TOWER_FLOOR_THEMES.length,
         false
       );
-      this.landedBlocks.push({ container: floor, x: topBlock.x, y: floorY, rotation: topBlock.rotation });
+      this.landedBlocks.push({
+        container: floor,
+        x: topBlock.x,
+        y: floorY,
+        rotation: topBlock.rotation,
+        width: this.blockWidth,
+        height: this.blockHeight,
+      });
       this.currentHeight += 1;
     }
 
@@ -292,6 +357,9 @@ export class TowerScene extends Phaser.Scene {
       this.swingingBlock = null;
     }
     this.isDropping = false;
+    this.isUnsupportedFall = false;
+    this.isResolvingFall = false;
+    this.gravitySlideVelocities.clear();
     this.dropVy = 0;
     this.dropVx = 0;
     // JANGAN reset currentTiltSum di sini — ini hanya sync visual height dari server
@@ -313,11 +381,12 @@ export class TowerScene extends Phaser.Scene {
 
   private handleRelease() {
     // Izinkan drop hanya saat game aktif, tidak paused, tidak frozen
-    if (this.isDropping || this.isCollapsed || !this.swingingBlock) return;
+    if (this.isDropping || this.isCollapsed || this.isResolvingFall || !this.swingingBlock) return;
     if (!this.isGameActive || this.isPaused || this.isFrozen) return;
 
     try { navigator?.vibrate?.(25); } catch (_) { /* noop */ }
 
+    this.configData.onDropStarted?.();
     this.isDropping = true;
     this.ropeGraphics?.clear();
 
@@ -326,44 +395,39 @@ export class TowerScene extends Phaser.Scene {
     this.dropVy = 80;
   }
 
-  private processLanding(topBlock: { container: Phaser.GameObjects.Container; x: number; y: number; rotation: number }) {
+  private processLanding(topBlock: {
+    container: Phaser.GameObjects.Container;
+    x: number;
+    y: number;
+    rotation: number;
+    width: number;
+    height: number;
+  }) {
     if (!this.swingingBlock) return;
 
     const bx = this.swingingBlock.x;
     const diff = bx - topBlock.x;
-    const maxDiff = (this.blockWidth / 2) + 26;
-
-    // Miss: block fell completely off the side
-    if (Math.abs(diff) > maxDiff) {
-      this.handleMiss();
+    const supportHalfWidth = this.getProjectedHalfWidth(topBlock.width, topBlock.height, topBlock.rotation);
+    const fallingHalfWidth = this.getProjectedHalfWidth(this.blockWidth, this.blockHeight, this.swingingBlock.rotation);
+    if (Math.abs(diff) >= supportHalfWidth + fallingHalfWidth) {
+      this.isDropping = true;
+      this.isUnsupportedFall = true;
+      this.showFeedback(bx, this.swingingBlock.y, false, 0, "JATUH!");
       return;
     }
 
-    // Land — block is already snapped to targetY by the update loop
+    // Land on the rotated support face, not on an assumed horizontal layer.
     this.isDropping = false;
-    const landY = topBlock.y - this.blockHeight;
 
-    const ratio = Math.max(-1, Math.min(1, diff / (this.blockWidth / 2)));
+    const ratio = Math.max(-1, Math.min(1, diff / Math.max(1, supportHalfWidth)));
     const precision = Math.max(0, Math.round(100 - Math.abs(ratio) * 100));
-    const perfect = Math.abs(ratio) < 0.08;
+    const towerIsSteady = Math.abs(this.gravitySwayAngle) < Phaser.Math.DegToRad(3) && Math.abs(this.currentTiltSum) < 15;
+    const perfect = Math.abs(ratio) < 0.08 && towerIsSteady;
 
-    // tilt dalam derajat, akumulasi per blok
-    // Base tilt dari posisi jatuh
-    const baseTilt = perfect ? 0 : ratio * 6.5;
-    // Gravitational amplification: semakin miring tower, semakin besar pengaruh tiap blok baru
-    // Ini mensimulasikan pusat massa yang bergeser
-    const tiltFactor = 1 + Math.abs(this.currentTiltSum) / this.MAX_TILT;
-    const tiltDelta = baseTilt * tiltFactor;
-
-    // Passive gravity tilt: tower yang sudah miring terus bertambah miring
-    // karena pusat gravitasi bergeser (bahkan blok sempurna tidak menghentikannya sepenuhnya)
-    const gravityTilt = (this.currentTiltSum / this.MAX_TILT) * 0.8;
-
-    this.currentTiltSum += tiltDelta + gravityTilt;
-
-    // Clamp visual display (derajat)
-    const clampedDeg = Math.max(-this.MAX_TILT, Math.min(this.MAX_TILT, this.currentTiltSum));
-    const clampedRad = Phaser.Math.DegToRad(clampedDeg);
+    const impactAngle = Phaser.Math.DegToRad(Math.max(-7, Math.min(7, ratio * 5)));
+    const clampedRad = Phaser.Math.Clamp(topBlock.rotation + impactAngle, -0.35, 0.35);
+    const landY = this.getContactY(topBlock, bx, clampedRad);
+    this.swingingBlock.setPosition(bx, landY);
     this.swingingBlock.setRotation(clampedRad);
 
     // Small bounce tween to make landing feel physical
@@ -385,83 +449,342 @@ export class TowerScene extends Phaser.Scene {
       x: bx,
       y: landY,
       rotation: clampedRad, // simpan dalam radian (konsisten dengan Phaser)
+      width: this.blockWidth,
+      height: this.blockHeight,
     });
 
     this.swingingBlock = null;
     this.currentHeight += 1;
+    this.settleTowerStack();
+    this.currentTiltSum = this.calculateTowerTilt();
 
-    this.showFeedback(bx, landY - 24, perfect, tiltDelta);
+    this.showFeedback(bx, landY - 24, perfect, this.currentTiltSum);
 
     this.configData.onDropBlock?.({
       precision,
       offsetRatio: ratio,
-      tiltAngle: tiltDelta,
+      tiltAngle: this.currentTiltSum,
       currentHeight: this.currentHeight,
       tiltSum: this.currentTiltSum,
       perfect,
       isAlive: true,
     });
 
-    // Collapse check — gunakan nilai absolut currentTiltSum (derajat)
-    // Juga collapse jika kemiringan visual sudah di batas maksimum DAN masih bertambah
-    if (Math.abs(this.currentTiltSum) >= this.MAX_TILT) {
-      this.triggerCollapse();
+    const globalTipDirection = this.getGlobalTipDirection();
+    if (globalTipDirection !== 0 && this.currentHeight > 1) {
+      this.toppleTower(1, globalTipDirection);
+      return;
+    }
+
+    const unstableSupport = this.findUnstableSupport();
+    if (unstableSupport) {
+      const direction = Math.sign(unstableSupport.signedOffsetRatio) || Math.sign(diff) || 1;
+      if (unstableSupport.offsetRatio > 1 && this.currentHeight > 1) {
+        this.toppleTower(unstableSupport.fallStartIndex, direction);
+        return;
+      }
+      const supportIndex = unstableSupport.fallStartIndex - 1;
+      if (supportIndex !== this.gravitySwaySupportIndex) {
+        this.gravitySwayAngle = 0;
+        this.gravitySwayVelocity = 0;
+        this.gravitySwaySupportIndex = supportIndex;
+      }
+      this.gravitySwayVelocity = Phaser.Math.Clamp(
+        this.gravitySwayVelocity + unstableSupport.signedOffsetRatio * 0.65,
+        -1.8,
+        1.8
+      );
+    }
+
+    if (Math.abs(this.currentTiltSum) > this.MAX_TILT) {
+      this.currentTiltSum = Math.sign(this.currentTiltSum) * this.MAX_TILT;
+    }
+
+    if (this.isCollapsed) {
       return;
     }
 
     this.panCameraAndSpawn();
   }
 
-  private handleMiss() {
-    if (!this.swingingBlock) return;
-
+  private finishUnsupportedFall() {
     this.isDropping = false;
+    this.isUnsupportedFall = false;
     const falling = this.swingingBlock;
     this.swingingBlock = null;
+    falling?.destroy();
+    if (!this.isCollapsed) this.spawnSwingingBlock();
+  }
 
-    this.tweens.add({
-      targets: falling,
-      alpha: 0,
-      y: falling.y + 350,
-      duration: 600,
-      onComplete: () => falling.destroy(),
-    });
+  private calculateTowerTilt() {
+    if (this.currentHeight <= 0) return 0;
+    const base = this.landedBlocks[0];
+    const centerOfMass = this.calculateTowerCenterOfMass();
+    if (!centerOfMass) return 0;
+    const verticalCenter = base.y - centerOfMass.y;
+    const angle = Phaser.Math.RadToDeg(Math.atan2(centerOfMass.x - base.x, verticalCenter));
+    return Math.max(-this.MAX_TILT, Math.min(this.MAX_TILT, angle));
+  }
 
-    this.showFeedback(falling.x, falling.y, false, 0, "MELESET!");
-    this.configData.onBlockMissed?.();
+  private calculateTowerCenterOfMass() {
+    let totalMass = 0;
+    let weightedX = 0;
+    let weightedY = 0;
 
-    this.time.delayedCall(650, () => {
-      if (!this.isCollapsed) this.spawnSwingingBlock();
+    for (const block of this.landedBlocks.slice(1)) {
+      const mass = block.width * block.height;
+      totalMass += mass;
+      weightedX += block.x * mass;
+      weightedY += block.y * mass;
+    }
+
+    if (totalMass === 0) return null;
+    return { x: weightedX / totalMass, y: weightedY / totalMass };
+  }
+
+  private getGlobalTipDirection() {
+    const foundation = this.landedBlocks[0];
+    const centerOfMass = this.calculateTowerCenterOfMass();
+    if (!foundation || !centerOfMass) return 0;
+
+    const supportHalfWidth = this.getProjectedHalfWidth(
+      foundation.width,
+      foundation.height,
+      foundation.rotation
+    );
+    const horizontalOffset = centerOfMass.x - foundation.x;
+    if (Math.abs(horizontalOffset) <= supportHalfWidth) return 0;
+    return Math.sign(horizontalOffset);
+  }
+
+  private getProjectedHalfWidth(width: number, height: number, rotation: number) {
+    return (Math.abs(Math.cos(rotation)) * width + Math.abs(Math.sin(rotation)) * height) / 2;
+  }
+
+  private getContactY(
+    support: {
+      container: Phaser.GameObjects.Container;
+      x: number;
+      y: number;
+      rotation: number;
+      width: number;
+      height: number;
+    },
+    childX: number,
+    childRotation: number
+  ) {
+    const supportAngle = support.rotation;
+    const supportTopX = support.x + Math.sin(supportAngle) * support.height / 2;
+    const supportTopY = support.y - Math.cos(supportAngle) * support.height / 2;
+    const relativeAngle = childRotation - supportAngle;
+    const childBottomExtent =
+      (this.blockHeight / 2) * Math.cos(relativeAngle) +
+      (this.blockWidth / 2) * Math.abs(Math.sin(relativeAngle));
+    const safeCosine = Math.max(0.85, Math.cos(supportAngle));
+    return supportTopY + Math.tan(supportAngle) * (childX - supportTopX) - childBottomExtent / safeCosine;
+  }
+
+  private settleTowerStack() {
+    for (let index = 1; index < this.landedBlocks.length; index++) {
+      const support = this.landedBlocks[index - 1];
+      const block = this.landedBlocks[index];
+      block.y = this.getContactY(support, block.x, block.rotation);
+      block.container.setPosition(block.x, block.y);
+    }
+  }
+
+  private findUnstableSupport() {
+    let mostUnstable: { fallStartIndex: number; centerOfMass: number; supportX: number; offsetRatio: number; signedOffsetRatio: number } | null = null;
+    const centersOfMass = new Array<number>(this.landedBlocks.length);
+    let accumulatedX = 0;
+    let accumulatedBlocks = 0;
+
+    for (let blockIndex = this.landedBlocks.length - 1; blockIndex >= 1; blockIndex--) {
+      accumulatedX += this.landedBlocks[blockIndex].x;
+      accumulatedBlocks += 1;
+      centersOfMass[blockIndex - 1] = accumulatedX / accumulatedBlocks;
+    }
+
+    for (let supportIndex = 0; supportIndex < this.landedBlocks.length - 1; supportIndex++) {
+      const support = this.landedBlocks[supportIndex];
+      const centerOfMass = centersOfMass[supportIndex];
+      const supportHalfWidth = Math.max(1, support.width / 2);
+      const topFaceCenterX = support.x + Math.sin(support.rotation) * support.height / 2;
+      const gravityProjection = (centerOfMass - topFaceCenterX) / Math.max(0.5, Math.cos(support.rotation));
+      const signedOffsetRatio = gravityProjection / supportHalfWidth;
+      const offsetRatio = Math.abs(signedOffsetRatio);
+      const candidate = { fallStartIndex: supportIndex + 1, centerOfMass, supportX: support.x, offsetRatio, signedOffsetRatio };
+      if (offsetRatio > 1) return candidate;
+      if (offsetRatio > (mostUnstable?.offsetRatio ?? 0)) {
+        mostUnstable = candidate;
+      }
+    }
+
+    return mostUnstable;
+  }
+
+  private updateTowerGravity(dt: number) {
+    const instability = this.findUnstableSupport();
+    if (!instability) return;
+
+    const direction = Math.sign(instability.signedOffsetRatio) || 1;
+    if (instability.offsetRatio > 1 && this.currentHeight > 1) {
+      this.toppleTower(instability.fallStartIndex, direction);
+      return;
+    }
+
+    const supportIndex = instability.fallStartIndex - 1;
+    if (supportIndex !== this.gravitySwaySupportIndex) {
+      this.gravitySwayAngle = 0;
+      this.gravitySwayVelocity = 0;
+      this.gravitySwaySupportIndex = supportIndex;
+    }
+    this.applyGravitySliding(dt);
+    const globalTipDirection = this.getGlobalTipDirection();
+    if (globalTipDirection !== 0 && this.currentHeight > 1) {
+      this.toppleTower(1, globalTipDirection);
+      return;
+    }
+
+    const shiftedInstability = this.findUnstableSupport();
+    if (shiftedInstability && shiftedInstability.offsetRatio > 1 && this.currentHeight > 1) {
+      this.toppleTower(shiftedInstability.fallStartIndex, Math.sign(shiftedInstability.signedOffsetRatio) || 1);
+      return;
+    }
+
+    const targetLean = direction * Phaser.Math.Clamp((instability.offsetRatio - 0.2) * 0.38, 0, 0.26);
+    const nextSway = advanceGravitySway(this.gravitySwayAngle, this.gravitySwayVelocity, targetLean, dt);
+    const angleDelta = nextSway.angle - this.gravitySwayAngle;
+    this.gravitySwayAngle = nextSway.angle;
+    this.gravitySwayVelocity = nextSway.velocity;
+
+    if (Math.abs(angleDelta) > 0.00001) {
+      this.rotateTowerSection(supportIndex, angleDelta);
+      this.currentTiltSum = this.calculateTowerTilt();
+    }
+  }
+
+  private rotateTowerSection(supportIndex: number, angleDelta: number) {
+    const support = this.landedBlocks[supportIndex];
+    if (!support) return;
+
+    const pivotX = support.x;
+    const pivotY = support.y - Math.cos(support.rotation) * support.height / 2;
+    const cosine = Math.cos(angleDelta);
+    const sine = Math.sin(angleDelta);
+
+    for (const block of this.landedBlocks.slice(supportIndex + 1)) {
+      const dx = block.x - pivotX;
+      const dy = block.y - pivotY;
+      block.x = pivotX + dx * cosine - dy * sine;
+      block.y = pivotY + dx * sine + dy * cosine;
+      block.rotation = Phaser.Math.Clamp(block.rotation + angleDelta, -0.45, 0.45);
+      block.container.setPosition(block.x, block.y);
+      block.container.setRotation(block.rotation);
+    }
+
+    this.settleTowerStack();
+  }
+
+  private applyGravitySliding(dt: number) {
+    const frictionCoefficient = 0.28;
+    let hasMoved = false;
+
+    for (let supportIndex = 1; supportIndex < this.landedBlocks.length - 1; supportIndex++) {
+      const support = this.landedBlocks[supportIndex];
+      const slope = support.rotation;
+      const downhillForce = 980 * Math.sin(slope);
+      const frictionForce = 980 * frictionCoefficient * Math.cos(slope);
+      const velocity = this.gravitySlideVelocities.get(supportIndex) ?? 0;
+      const isAlreadySliding = Math.abs(velocity) > 0.01;
+
+      if (!isAlreadySliding && Math.abs(downhillForce) <= frictionForce) continue;
+
+      const acceleration = downhillForce - Math.sign(velocity || downhillForce) * frictionForce;
+      let nextVelocity = Phaser.Math.Clamp(velocity + acceleration * dt, -280, 280);
+      if (velocity !== 0 && Math.sign(nextVelocity) !== Math.sign(velocity) && Math.abs(nextVelocity) < 1) {
+        nextVelocity = 0;
+      }
+      this.gravitySlideVelocities.set(supportIndex, nextVelocity);
+
+      if (Math.abs(nextVelocity) <= 0.5) continue;
+      const distance = nextVelocity * dt;
+      for (const block of this.landedBlocks.slice(supportIndex + 1)) {
+        block.x += Math.cos(slope) * distance;
+        block.y += Math.sin(slope) * distance;
+      }
+      hasMoved = true;
+    }
+
+    for (const supportIndex of this.gravitySlideVelocities.keys()) {
+      if (supportIndex >= this.landedBlocks.length - 1) this.gravitySlideVelocities.delete(supportIndex);
+    }
+
+    if (hasMoved) this.settleTowerStack();
+  }
+
+  private toppleTower(startIndex: number, direction: number) {
+    const fallingBlocks = this.landedBlocks.slice(startIndex);
+    if (fallingBlocks.length === 0) return;
+
+    this.isResolvingFall = true;
+    this.isDropping = false;
+    this.ropeGraphics?.clear();
+    this.swingingBlock?.destroy();
+    this.swingingBlock = null;
+    this.cameras.main.shake(500, 0.018);
+
+    let completedFalls = 0;
+    fallingBlocks.forEach((item, index) => {
+      this.tweens.add({
+        targets: item.container,
+        x: item.x + direction * (70 + index * 24),
+        y: item.y + this.blockHeight * (2.5 + index * 0.45),
+        rotation: item.rotation + direction * (0.65 + index * 0.08),
+        alpha: 0,
+        duration: 520 + index * 65,
+        ease: "Cubic.easeIn",
+        onComplete: () => {
+          completedFalls += 1;
+          if (completedFalls === fallingBlocks.length) {
+            this.finishTopple(startIndex, fallingBlocks.length);
+          }
+        },
+      });
     });
   }
 
-  private triggerCollapse() {
-    this.isCollapsed = true;
-    this.isDropping = false;
-    this.ropeGraphics?.clear();
-
-    this.cameras.main.shake(800, 0.03);
-
-    const dir = this.currentTiltSum > 0 ? 1 : -1;
-    this.landedBlocks.forEach((item, i) => {
-      if (i === 0) return;
-      this.tweens.add({
-        targets: item.container,
-        x: item.x + dir * (130 + i * 30),
-        y: item.y + 440 + i * 30,
-        rotation: item.rotation + dir * 1.6,
-        alpha: 0,
-        duration: 900 + i * 80,
-        ease: "Cubic.easeIn",
-      });
-    });
-
-    this.showFeedback(this.anchorX, this.anchorY + 120, false, 0, "RUNTUH!");
+  private finishTopple(startIndex: number, blocksFell: number) {
+    this.landedBlocks.splice(startIndex, blocksFell).forEach((block) => block.container.destroy());
+    this.currentHeight = this.landedBlocks.length - 1;
+    this.currentTiltSum = this.calculateTowerTilt();
+    this.isCollapsed = this.currentHeight === 0;
+    this.showFeedback(this.anchorX, this.anchorY + 120, false, 0, this.isCollapsed ? "RUNTUH!" : `-${blocksFell} BALOK`);
 
     this.configData.onTowerCollapsed?.({
       height: this.currentHeight,
       tiltSum: this.currentTiltSum,
+      blocksFell,
+      isAlive: !this.isCollapsed,
     });
+
+    if (!this.isCollapsed) {
+      this.anchorY = this.scale.height * 0.22 - this.currentHeight * this.blockHeight;
+      const scrollY = Math.max(0, (this.currentHeight - 2.5) * this.blockHeight);
+      const camera = this.cameras.main;
+      camera.pan(
+        this.scale.width / 2,
+        (this.scale.height / 2) - scrollY,
+        620,
+        "Cubic.easeInOut"
+      );
+      this.time.delayedCall(640, () => {
+        this.isResolvingFall = false;
+        this.spawnSwingingBlock();
+      });
+    } else {
+      this.isResolvingFall = false;
+    }
   }
 
   private panCameraAndSpawn() {

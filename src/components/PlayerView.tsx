@@ -5,7 +5,7 @@ import type { DropBlockData } from "../game/scenes/TowerScene";
 import { QuestionOverlay } from "./QuestionOverlay";
 import {
   Clock, Trophy, Flame, Snowflake, LogOut, Landmark, Coins, Hammer,
-  Play, Crown, Bot, LayoutDashboard,
+  Play, Crown, LayoutDashboard,
 } from "lucide-react";
 
 interface PlayerViewProps {
@@ -13,14 +13,14 @@ interface PlayerViewProps {
   sessionId: string;
   autoPlaceRequest: number;
   isGameMaster?: boolean;
+  onBlockDropStarted: () => void;
+  onBlocksFell: (data: { blocksFell: number; isAlive: boolean }) => void;
   onPlaceBlock: (payload: BlockPlacePayload) => void;
   onLeave: () => void;
   onStart?: (durationSeconds?: number) => void;
   onPause?: () => void;
   onResume?: () => void;
   onSetMultiplier?: (multiplier: number) => void;
-  onForceFinish?: () => void;
-  onAddBots?: () => void;
   onSwitchToDashboard?: () => void;
   currentQuestion?: Question | null;
   questionResult?: QuestionResult | null;
@@ -32,14 +32,14 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   sessionId,
   autoPlaceRequest,
   isGameMaster = false,
+  onBlockDropStarted,
+  onBlocksFell,
   onPlaceBlock,
   onLeave,
   onStart,
   onPause: _onPause,
   onResume,
   onSetMultiplier: _onSetMultiplier,
-  onForceFinish: _onForceFinish,
-  onAddBots,
   onSwitchToDashboard,
   currentQuestion,
   questionResult,
@@ -104,15 +104,9 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
     });
   };
 
-  const handleTowerCollapsed = (data: { height: number; tiltSum: number }) => {
+  const handleTowerCollapsed = (data: { height: number; tiltSum: number; blocksFell: number; isAlive: boolean }) => {
     setCurrentTilt(data.tiltSum);
-    onPlaceBlock({
-      height: data.height,
-      diff: 999,
-      width: 0,
-      perfect: false,
-      isAlive: false,
-    });
+    onBlocksFell({ blocksFell: data.blocksFell, isAlive: data.isAlive });
   };
 
   const triggerMobileDrop = () => {
@@ -175,6 +169,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
           isPaused={isPaused}
           isFrozen={isFrozen}
           initialHeight={myPlayer?.towerHeight || 0}
+          onDropStarted={onBlockDropStarted}
           onDropBlock={handleDropBlock}
           onTowerCollapsed={handleTowerCollapsed}
         />
@@ -399,21 +394,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               {onStart && (
                 <button
                   type="button"
-                  onClick={onStart}
+                  onClick={() => onStart()}
                   className="w-full py-3.5 rounded-2xl font-black text-sm text-white bg-gradient-to-r from-amber-500 to-amber-600 hover:brightness-110 active:scale-95 shadow-xl shadow-amber-500/30 flex items-center justify-center gap-2 cursor-pointer transition-all"
                 >
                   <Play className="w-4 h-4 fill-white text-white" />
                   <span>Mulai Sayembara</span>
-                </button>
-              )}
-              {onAddBots && (
-                <button
-                  type="button"
-                  onClick={onAddBots}
-                  className="w-full py-2.5 rounded-xl font-bold text-xs text-white/70 bg-white/10 border border-white/10 hover:bg-white/15 flex items-center justify-center gap-2 cursor-pointer transition-all"
-                >
-                  <Bot className="w-3.5 h-3.5 text-amber-400" />
-                  <span>Tambah Bot (AI)</span>
                 </button>
               )}
             </div>

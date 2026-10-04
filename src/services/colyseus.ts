@@ -1,21 +1,14 @@
 import { Client, Room } from "colyseus.js";
 
+const DEFAULT_API_URL = "https://brave-balance-production-f894.up.railway.app";
+const DEFAULT_WS_URL = "wss://brave-balance-production-f894.up.railway.app";
+
 export function getApiBaseUrl(): string {
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL;
-  }
-  const protocol = window.location.protocol === "https:" ? "https:" : "http:";
-  const hostname = window.location.hostname || "localhost";
-  return `${protocol}//${hostname}:2567`;
+  return DEFAULT_API_URL;
 }
 
 function getWsUrl(): string {
-  if (import.meta.env.VITE_WS_URL) {
-    return import.meta.env.VITE_WS_URL;
-  }
-  const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-  const hostname = window.location.hostname || "localhost";
-  return `${protocol}//${hostname}:2567`;
+  return DEFAULT_WS_URL;
 }
 
 export const colyseusClient = new Client(getWsUrl());

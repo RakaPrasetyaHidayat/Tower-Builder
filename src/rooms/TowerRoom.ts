@@ -20,6 +20,7 @@ export type CardType =
   | "STALLED_PROJECT"
   | "BUILDING_EVICTION";
 export type GameMode = "fast_building" | "question_building";
+const FREEZE_DURATION_MS = 5000;
 
 // ── Bank soal pertanyaan ────────────────────────────────────────────────────
 export interface Question {
@@ -52,6 +53,7 @@ export class TowerRoom extends Room<GameState> {
   // Track apakah jawaban terakhir player benar (untuk syarat card choice di QB mode)
   private playerLastAnswerCorrect = new Map<string, boolean>();
   private blockScoreLedger = new Map<string, number[]>();
+  private pendingBlockDrops = new Map<string, number>();
 
   onCreate(options: { roomCode?: string; nickname?: string }) {
     this.setState(new GameState());
@@ -103,6 +105,14 @@ export class TowerRoom extends Room<GameState> {
       client.send("custom_questions", { questions: this.customQuestions });
     });
 
+    this.onMessage("block_drop_started", (client) => {
+      if (this.state.status !== "PLAYING" || this.state.isPaused) return;
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.isAlive || player.isFrozen) return;
+      if (this.state.gameMode === "question_building" && !player.canPlaceBlock) return;
+      this.pendingBlockDrops.set(client.sessionId, Date.now());
+    });
+
     // ── drop_block ─────────────────────────────────────────────────────────
     this.onMessage("drop_block", (client, data: {
       height: number; diff: number; width: number; perfect: boolean; isAlive: boolean;
@@ -112,26 +122,32 @@ export class TowerRoom extends Room<GameState> {
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.isAlive) return;
 
+      const now = Date.now();
+      const dropStartedAt = this.pendingBlockDrops.get(client.sessionId);
+      this.pendingBlockDrops.delete(client.sessionId);
+
+      // A block released before a freeze is allowed to finish landing.
+      if (player.isFrozen) {
+        const freezeExpired = player.frozenUntil > 0 && now >= player.frozenUntil;
+        const dropWasAlreadyStarted = dropStartedAt !== undefined && now - dropStartedAt <= 10000;
+        if (freezeExpired) {
+          player.isFrozen = false;
+          player.frozenUntil = 0;
+        } else if (!dropWasAlreadyStarted) {
+          client.send("action_rejected", { reason: "Anda sedang dibekukan!" });
+          return;
+        }
+      }
+
       // Question Building: cek apakah player boleh meletakkan blok
       if (this.state.gameMode === "question_building" && !player.canPlaceBlock) {
         client.send("action_rejected", { reason: "Jawab pertanyaan dulu!" });
         return;
       }
 
-      const now = Date.now();
-
-      if (player.isFrozen) {
-        if (now < player.frozenUntil) {
-          client.send("action_rejected", { reason: "Anda sedang dibekukan!" });
-          return;
-        } else {
-          player.isFrozen = false;
-        }
-      }
-
       const isPerfect = data.perfect;
       player.towerHeight = data.height;
-      player.isAlive = data.isAlive;
+      player.isAlive = true;
       player.lastPlacedAt = now;
 
       if (isPerfect) { player.combo += 1; } else { player.combo = 0; }
@@ -161,15 +177,12 @@ export class TowerRoom extends Room<GameState> {
         isAlive: player.isAlive,
       });
 
-      // Question Building: setelah blok ditempatkan/miss, kirim soal berikutnya
+      // Question Building: after a successful landing, send the next question.
       if (this.state.gameMode === "question_building") {
         player.canPlaceBlock = false;
 
-        // Card choice setiap 5 blok di QB mode:
-        // Hanya jika jawaban terakhir BENAR dan blok BERHASIL MENDARAT (bukan miss)
-        // data.diff === 999 artinya tower collapse (bukan miss biasa)
-        // data.height > 0 dan data.isAlive true = blok mendarat normal
-        const blockLanded = data.isAlive && Math.abs(data.diff) <= 1.0; // diff ≤ 1.0 = mendarat (bukan miss yang diff=999)
+        // Card choice setiap 5 blok di QB mode hanya untuk blok yang mendarat.
+        const blockLanded = Math.abs(data.diff) <= 1.0;
         const lastAnswerCorrect = this.playerLastAnswerCorrect.get(client.sessionId) ?? false;
 
         if (
@@ -193,6 +206,46 @@ export class TowerRoom extends Room<GameState> {
       let anyPlayerAlive = false;
       this.state.players.forEach((p) => {
         if (p.isAlive && (p.role === "PLAYER" || p.towerHeight > 0)) anyPlayerAlive = true;
+      });
+      if (!anyPlayerAlive && this.state.players.size > 1) this.finishMatch();
+    });
+
+    this.onMessage("blocks_fell", (client, data: { blocksFell: number; isAlive: boolean }) => {
+      if (this.state.status !== "PLAYING" && this.state.status !== "PAUSED") return;
+      const player = this.state.players.get(client.sessionId);
+      if (!player || !player.isAlive) return;
+
+      const scores = this.blockScoreLedger.get(client.sessionId) ?? [];
+      const requestedLoss = Number.isFinite(data?.blocksFell) ? Math.max(0, Math.floor(data.blocksFell)) : 0;
+      const blocksFell = Math.min(requestedLoss, player.towerHeight, scores.length);
+      if (blocksFell === 0) return;
+
+      const lostScores = scores.splice(scores.length - blocksFell, blocksFell);
+      const pointsLost = lostScores.reduce((sum, score) => sum + score, 0);
+      player.towerHeight = Math.max(0, player.towerHeight - blocksFell);
+      player.score = Math.max(0, player.score - pointsLost);
+      player.combo = 0;
+      player.isAlive = Boolean(data.isAlive) && player.towerHeight > 0;
+      this.blockScoreLedger.set(client.sessionId, scores);
+
+      this.broadcast("blocks_fell", {
+        sessionId: client.sessionId,
+        nickname: player.nickname,
+        blocksFell,
+        pointsLost,
+        towerHeight: player.towerHeight,
+        score: player.score,
+        isAlive: player.isAlive,
+      });
+      this.broadcast("feed_notification", {
+        message: `💥 ${player.nickname} kehilangan ${blocksFell} balok dan ${pointsLost} poin!`,
+      });
+
+      let anyPlayerAlive = false;
+      this.state.players.forEach((currentPlayer) => {
+        if (currentPlayer.isAlive && (currentPlayer.role === "PLAYER" || currentPlayer.towerHeight > 0)) {
+          anyPlayerAlive = true;
+        }
       });
       if (!anyPlayerAlive && this.state.players.size > 1) this.finishMatch();
     });
@@ -388,16 +441,17 @@ export class TowerRoom extends Room<GameState> {
           if (!data.targetSessionId) return;
           const target = this.state.players.get(data.targetSessionId);
           if (target) {
-            target.isFrozen = !target.isFrozen;
-            target.frozenUntil = target.isFrozen ? Date.now() + 10000 : 0;
+            if (target.isFrozen) {
+              target.isFrozen = false;
+              target.frozenUntil = 0;
+            } else {
+              this.freezePlayer(target);
+            }
             this.broadcast("feed_notification", {
               message: target.isFrozen
-                ? `Game Master membekukan ${target.nickname}!`
+                ? `Game Master membekukan ${target.nickname} selama 5 detik!`
                 : `Game Master melepas pembekuan ${target.nickname}.`,
             });
-            if (target.isFrozen) {
-              this.clock.setTimeout(() => { if (target.isFrozen && Date.now() >= target.frozenUntil) target.isFrozen = false; }, 10000);
-            }
           }
           break;
         }
@@ -441,6 +495,7 @@ export class TowerRoom extends Room<GameState> {
           this.playerQuestions.clear();
           this.playerLastAnswerCorrect.clear();
           this.blockScoreLedger.clear();
+          this.pendingBlockDrops.clear();
           this.state.status = "LOBBY";
           this.state.timeRemaining = 180;
           this.state.scoreMultiplier = 1.0;
@@ -513,18 +568,18 @@ export class TowerRoom extends Room<GameState> {
         const stolenPoints = Math.min(target.score, Math.max(100, Math.round(target.score * 0.25)));
         target.score -= stolenPoints;
         attacker.score += stolenPoints;
+        this.clients.find((client) => client.sessionId === target.sessionId)?.send("sabotage_notification", {
+          message: `${attacker.nickname} mengambil ${stolenPoints} poin Upeti Anda!`,
+        });
         this.broadcast("feed_notification", { message: `💸 ${attacker.nickname} mengambil ${stolenPoints} poin dari ${target.nickname}!` });
         break;
       }
       case "STALLED_PROJECT": {
-        const now = Date.now();
-        target.isFrozen = true;
-        target.frozenUntil = now + 5000;
-        this.clients.find((client) => client.sessionId === target.sessionId)?.send("frozen_notification", { durationMs: 5000 });
-        this.broadcast("feed_notification", { message: `⏸️ Proyek ${target.nickname} mangkrak selama 5 detik!` });
-        this.clock.setTimeout(() => {
-          if (target.isFrozen && Date.now() >= target.frozenUntil) target.isFrozen = false;
-        }, 5000);
+        this.freezePlayer(target);
+        this.clients.find((client) => client.sessionId === target.sessionId)?.send("sabotage_notification", {
+          message: `${attacker.nickname} membekukan proyek Anda selama 5 detik!`,
+        });
+        this.broadcast("feed_notification", { message: `⏸️ Proyek ${target.nickname} dibekukan oleh ${attacker.nickname} selama 5 detik.` });
         break;
       }
       case "BUILDING_EVICTION": {
@@ -536,12 +591,27 @@ export class TowerRoom extends Room<GameState> {
         target.score = Math.max(0, target.score - stolenPoints);
         attacker.score += stolenPoints;
         this.clients.find((client) => client.sessionId === target.sessionId)?.send("tower_blocks_removed", { height: target.towerHeight });
+        this.clients.find((client) => client.sessionId === target.sessionId)?.send("sabotage_notification", {
+          message: `${attacker.nickname} menertibkan ${blocksStolen} blok menara Anda.`,
+        });
         this.broadcast("feed_notification", {
           message: `🚧 ${attacker.nickname} menertibkan ${blocksStolen} blok ${target.nickname} dan mengambil ${stolenPoints} poin!`,
         });
         break;
       }
     }
+  }
+
+  private freezePlayer(target: PlayerState) {
+    const frozenUntil = Date.now() + FREEZE_DURATION_MS;
+    target.isFrozen = true;
+    target.frozenUntil = frozenUntil;
+    this.clock.setTimeout(() => {
+      if (target.frozenUntil !== frozenUntil) return;
+      target.isFrozen = false;
+      target.frozenUntil = 0;
+      this.broadcast("feed_notification", { message: `Pembekuan ${target.nickname} berakhir.` });
+    }, FREEZE_DURATION_MS);
   }
 
   private sendCardChoice(client: Client, height: number) {
@@ -596,8 +666,9 @@ export class TowerRoom extends Room<GameState> {
       this.state.players.forEach((player, sId) => {
         if (!sId.startsWith("bot_") || !player.isAlive) return;
         if (player.isFrozen) {
-          if (now >= player.frozenUntil) player.isFrozen = false;
-          else return;
+          if (player.frozenUntil === 0 || now < player.frozenUntil) return;
+          player.isFrozen = false;
+          player.frozenUntil = 0;
         }
         if (Math.random() < 0.75) {
           const rand = Math.random();
@@ -671,6 +742,7 @@ export class TowerRoom extends Room<GameState> {
 
     this.playerQuestions.delete(client.sessionId);
     this.playerLastAnswerCorrect.delete(client.sessionId);
+    this.pendingBlockDrops.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
   }
 

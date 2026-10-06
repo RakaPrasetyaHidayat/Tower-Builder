@@ -15,16 +15,17 @@ export const QuestionOverlay: React.FC<QuestionOverlayProps> = ({
   canPlaceBlock,
   onAnswer,
 }) => {
-  const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
+  const [selectedAnswer, setSelectedAnswer] = useState<{
+    questionId: number;
+    questionNumber: number;
+    index: number;
+  } | null>(null);
   const [penaltyCountdown, setPenaltyCountdown] = useState<number>(0);
   const countdownRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  // Reset pilihan saat soal baru masuk
-  useEffect(() => {
-    if (question) {
-      setSelectedIdx(null);
-    }
-  }, [question?.questionId]);
+  const selectedIdx = selectedAnswer?.questionId === question?.questionId &&
+    selectedAnswer?.questionNumber === question?.questionNumber
+    ? selectedAnswer?.index ?? null
+    : null;
 
   // Hitung mundur penalti
   useEffect(() => {
@@ -47,7 +48,11 @@ export const QuestionOverlay: React.FC<QuestionOverlayProps> = ({
 
   const handleAnswer = (idx: number) => {
     if (selectedIdx !== null || !question) return; // sudah jawab
-    setSelectedIdx(idx);
+    setSelectedAnswer({
+      questionId: question.questionId,
+      questionNumber: question.questionNumber,
+      index: idx,
+    });
     onAnswer(question.questionId, idx);
   };
 

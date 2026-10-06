@@ -12,6 +12,7 @@ interface PlayerViewProps {
   state: GameStateData;
   sessionId: string;
   autoPlaceRequest: number;
+  onAutoPlaceRequestConsumed: (count: number) => void;
   isGameMaster?: boolean;
   onBlockDropStarted: () => void;
   onBlocksFell: (data: { blocksFell: number; isAlive: boolean }) => void;
@@ -31,6 +32,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   state,
   sessionId,
   autoPlaceRequest,
+  onAutoPlaceRequestConsumed,
   isGameMaster = false,
   onBlockDropStarted,
   onBlocksFell,
@@ -47,14 +49,11 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
 }) => {
   const [currentTilt, setCurrentTilt] = useState(0);
   const gameRef = useRef<PhaserTowerGameHandle | null>(null);
-  const handledAutoPlaceRequest = useRef(autoPlaceRequest);
-
   useEffect(() => {
-    if (autoPlaceRequest === handledAutoPlaceRequest.current) return;
-    const newRequests = autoPlaceRequest - handledAutoPlaceRequest.current;
-    handledAutoPlaceRequest.current = autoPlaceRequest;
-    gameRef.current?.autoPlaceBlocks(newRequests * 2);
-  }, [autoPlaceRequest]);
+    if (autoPlaceRequest <= 0) return;
+    gameRef.current?.autoPlaceBlocks(autoPlaceRequest * 2);
+    onAutoPlaceRequestConsumed(autoPlaceRequest);
+  }, [autoPlaceRequest, onAutoPlaceRequestConsumed]);
 
   const myPlayer = state.players?.[sessionId];
 
@@ -75,9 +74,10 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
   const isLobby = state.status === "LOBBY";
   const isFinished = state.status === "FINISHED";
   const isFrozen = Boolean(myPlayer?.isFrozen);
+  const isEliminated = isPlaying && myPlayer?.isAlive === false;
   const isQuestionMode = state.gameMode === "question_building";
   // Boleh tap drop hanya jika: bukan question mode, ATAU question mode dan canPlaceBlock=true
-  const canDrop = !isQuestionMode || Boolean(myPlayer?.canPlaceBlock);
+  const canDrop = myPlayer?.isAlive !== false && (!isQuestionMode || Boolean(myPlayer?.canPlaceBlock));
 
   // Sync isGameActive ke scene saat status berubah
   const prevPlayingRef = useRef(isPlaying);
@@ -165,7 +165,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       <div className="absolute inset-0">
         <PhaserTowerGame
           ref={gameRef}
-          isPlaying={isPlaying}
+          isPlaying={isPlaying && myPlayer?.isAlive !== false}
           isPaused={isPaused}
           isFrozen={isFrozen}
           initialHeight={myPlayer?.towerHeight || 0}
@@ -329,7 +329,7 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
       )}
 
       {/* Bottom: Tap-to-Drop button — full width, safe area aware */}
-      {isPlaying && !isPaused && !isFrozen && canDrop && (
+      {isPlaying && !isEliminated && !isPaused && !isFrozen && canDrop && (
         <div className="absolute bottom-0 left-0 right-0 z-30 p-3 pb-[max(12px,env(safe-area-inset-bottom))]">
           <button
             type="button"
@@ -427,6 +427,16 @@ export const PlayerView: React.FC<PlayerViewProps> = ({
               <span>Lanjutkan</span>
             </button>
           )}
+        </div>
+      )}
+
+      {/* Finished Overlay */}
+      {isEliminated && (
+        <div className="absolute inset-0 z-40 flex items-center justify-center bg-slate-950/45 p-6 text-center backdrop-blur-sm">
+          <div className="max-w-sm rounded-2xl border border-rose-300/25 bg-slate-950/85 px-6 py-5 shadow-2xl">
+            <h2 className="text-xl font-black text-rose-200">Menara Runtuh</h2>
+            <p className="mt-2 text-sm text-white/70">Anda tersingkir dari ronde ini. Tunggu Sultan memulai ronde baru.</p>
+          </div>
         </div>
       )}
 

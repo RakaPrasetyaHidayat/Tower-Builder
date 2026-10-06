@@ -26,6 +26,7 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
     const containerRef = useRef<HTMLDivElement | null>(null);
     const gameRef = useRef<Phaser.Game | null>(null);
     const sceneRef = useRef<TowerScene | null>(null);
+  const pendingAutoPlaceRef = useRef(0);
     const latestHeightRef = useRef(initialHeight ?? 0);
     const latestPausedRef = useRef(isPaused);
     const latestPlayingRef = useRef(isPlaying);
@@ -45,7 +46,13 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
       triggerDrop: () => {
         sceneRef.current?.triggerDrop();
       },
-      autoPlaceBlocks: (count) => sceneRef.current?.autoPlaceBlocks(count),
+      autoPlaceBlocks: (count) => {
+        if (!sceneRef.current || !latestPlayingRef.current) {
+          pendingAutoPlaceRef.current += count;
+          return;
+        }
+        sceneRef.current.autoPlaceBlocks(count);
+      },
       syncTowerHeight: (height) => sceneRef.current?.syncTowerHeight(height),
       setGameActive: (active) => sceneRef.current?.setGameActive(active),
       resetTiltSum: () => sceneRef.current?.resetTiltSum(),
@@ -111,6 +118,14 @@ export const PhaserTowerGame = forwardRef<PhaserTowerGameHandle, PhaserTowerGame
           scene.setPauseState(latestPausedRef.current);
           scene.setFrozenState(latestFrozenRef.current);
           scene.syncTowerHeight(latestHeightRef.current);
+                  if (latestPlayingRef.current && pendingAutoPlaceRef.current > 0) {
+                    scene.autoPlaceBlocks(pendingAutoPlaceRef.current);
+                    pendingAutoPlaceRef.current = 0;
+                  }
+              if (isPlaying && pendingAutoPlaceRef.current > 0) {
+                sceneRef.current?.autoPlaceBlocks(pendingAutoPlaceRef.current);
+                pendingAutoPlaceRef.current = 0;
+              }
         }
       });
 

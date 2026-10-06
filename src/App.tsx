@@ -184,6 +184,7 @@ export function App() {
       setCardChoices(null);
       setDbSavedInfo(null);
       setRoundId((prev) => prev + 1);
+      setAutoPlaceRequest(0);
     });
     activeRoom.onMessage("action_rejected", (data: { reason: string }) => {
       setFeedNotification(data.reason);
@@ -429,6 +430,7 @@ export function App() {
       width: payload.width,
       perfect: payload.perfect,
       isAlive: payload.isAlive,
+      isAutoPlace: payload.isAutoPlace,
     });
   const handleBlockDropStarted = () => room?.send("block_drop_started");
   const handleBlocksFell = (data: { blocksFell: number; isAlive: boolean }) =>
@@ -549,6 +551,7 @@ export function App() {
           state={gameState}
           sessionId={mySessionId}
           autoPlaceRequest={autoPlaceRequest}
+          onAutoPlaceRequestConsumed={(count) => setAutoPlaceRequest((pending) => Math.max(0, pending - count))}
           isGameMaster={isGameMaster}
           onBlockDropStarted={handleBlockDropStarted}
           onBlocksFell={handleBlocksFell}

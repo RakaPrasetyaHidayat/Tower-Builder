@@ -46,14 +46,18 @@ export class TowerRoom extends Room<GameState> {
   maxClients = 31;
   private gameTimer?: Delayed;
   private botTimer?: Delayed;
+  private gameDeadlineMs?: number;
+  private gameDurationSeconds = 180;
 
   // Per-player question queues (sessionId → shuffled question list)
   private playerQuestions = new Map<string, Question[]>();
   private customQuestions: Question[] = [];
+  private pendingQuestionDeadlines = new Map<string, number>();
   // Track apakah jawaban terakhir player benar (untuk syarat card choice di QB mode)
   private playerLastAnswerCorrect = new Map<string, boolean>();
   private blockScoreLedger = new Map<string, number[]>();
   private pendingBlockDrops = new Map<string, number>();
+  private pendingFreeBlocks = new Map<string, number>();
 
   onCreate(options: { roomCode?: string; nickname?: string }) {
     this.setState(new GameState());
@@ -115,12 +119,16 @@ export class TowerRoom extends Room<GameState> {
 
     // ── drop_block ─────────────────────────────────────────────────────────
     this.onMessage("drop_block", (client, data: {
-      height: number; diff: number; width: number; perfect: boolean; isAlive: boolean;
+      height: number; diff: number; width: number; perfect: boolean; isAlive: boolean; isAutoPlace?: boolean;
     }) => {
       if (this.state.status !== "PLAYING" || this.state.isPaused) return;
 
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.isAlive) return;
+      if (this.pendingQuestionDeadlines.has(client.sessionId)) return;
+      const freeBlocksRemaining = this.pendingFreeBlocks.get(client.sessionId) ?? 0;
+      const isAuthorizedFreePlacement = data.isAutoPlace === true && freeBlocksRemaining > 0;
+      if (data.isAutoPlace && !isAuthorizedFreePlacement) return;
 
       const now = Date.now();
       const dropStartedAt = this.pendingBlockDrops.get(client.sessionId);
@@ -140,9 +148,13 @@ export class TowerRoom extends Room<GameState> {
       }
 
       // Question Building: cek apakah player boleh meletakkan blok
-      if (this.state.gameMode === "question_building" && !player.canPlaceBlock) {
+      if (this.state.gameMode === "question_building" && !player.canPlaceBlock && !isAuthorizedFreePlacement) {
         client.send("action_rejected", { reason: "Jawab pertanyaan dulu!" });
         return;
+      }
+      if (isAuthorizedFreePlacement) {
+        if (freeBlocksRemaining === 1) this.pendingFreeBlocks.delete(client.sessionId);
+        else this.pendingFreeBlocks.set(client.sessionId, freeBlocksRemaining - 1);
       }
 
       const isPerfect = data.perfect;
@@ -260,6 +272,7 @@ export class TowerRoom extends Room<GameState> {
 
       const player = this.state.players.get(client.sessionId);
       if (!player || !player.isAlive) return;
+      if (player.canPlaceBlock || this.pendingQuestionDeadlines.has(client.sessionId)) return;
 
       const questions = this.playerQuestions.get(client.sessionId);
       if (!questions?.length) return;
@@ -294,10 +307,17 @@ export class TowerRoom extends Room<GameState> {
         });
 
         // Setelah 3 detik, kirim soal berikutnya
+        const deadline = Date.now() + 3000;
+        this.pendingQuestionDeadlines.set(client.sessionId, deadline);
         this.clock.setTimeout(() => {
-          if (player.isAlive && this.state.status === "PLAYING") {
-            this.sendNextQuestion(client, player);
+          if (this.pendingQuestionDeadlines.get(client.sessionId) !== deadline) return;
+          if (this.state.status === "PAUSED") return;
+          if (this.state.status !== "PLAYING" || !player.isAlive) {
+            this.pendingQuestionDeadlines.delete(client.sessionId);
+            return;
           }
+          this.pendingQuestionDeadlines.delete(client.sessionId);
+          this.sendNextQuestion(client, player);
         }, 3000);
       }
     });
@@ -315,6 +335,7 @@ export class TowerRoom extends Room<GameState> {
           break;
         }
         case "LIQUID_BUDGET": {
+          this.pendingFreeBlocks.set(player.sessionId, (this.pendingFreeBlocks.get(player.sessionId) ?? 0) + 2);
           client.send("card_applied", { cardType: "LIQUID_BUDGET", blocks: 2 });
           this.broadcast("feed_notification", { message: `🏗️ Anggaran Cair menyusun 2 blok gratis untuk ${player.nickname}!` });
           break;
@@ -388,9 +409,15 @@ export class TowerRoom extends Room<GameState> {
           }
           this.state.status = "PLAYING";
           this.state.isPaused = false;
+          this.pendingQuestionDeadlines.clear();
 
-          const duration = data.durationSeconds || 180;
+          const requestedDuration = Number(data.durationSeconds);
+          const duration = Number.isFinite(requestedDuration) && requestedDuration > 0
+            ? Math.min(3600, Math.floor(requestedDuration))
+            : 180;
+          this.gameDurationSeconds = duration;
           this.state.timeRemaining = duration;
+          this.gameDeadlineMs = Date.now() + duration * 1000;
 
           // Inisialisasi question queue untuk semua player saat game mulai
           if (this.state.gameMode === "question_building") {
@@ -413,10 +440,11 @@ export class TowerRoom extends Room<GameState> {
           this.gameTimer?.clear();
           this.gameTimer = this.clock.setInterval(() => {
             if (!this.state.isPaused && this.state.status === "PLAYING") {
-              this.state.timeRemaining -= 1;
-              if (this.state.timeRemaining <= 0) this.finishMatch();
+              const remaining = Math.max(0, Math.ceil(((this.gameDeadlineMs ?? Date.now()) - Date.now()) / 1000));
+              this.state.timeRemaining = remaining;
+              if (remaining === 0) this.finishMatch();
             }
-          }, 1000);
+          }, 250);
 
           this.startBotSimulation();
           this.broadcast("match_started", { timeRemaining: duration, gameMode: this.state.gameMode });
@@ -424,6 +452,10 @@ export class TowerRoom extends Room<GameState> {
         }
 
         case "pause_game": {
+          if (this.gameDeadlineMs !== undefined) {
+            this.state.timeRemaining = Math.max(0, Math.ceil((this.gameDeadlineMs - Date.now()) / 1000));
+            this.gameDeadlineMs = undefined;
+          }
           this.state.isPaused = true;
           this.state.status = "PAUSED";
           this.broadcast("match_paused");
@@ -431,8 +463,16 @@ export class TowerRoom extends Room<GameState> {
         }
 
         case "resume_game": {
+          this.gameDeadlineMs = Date.now() + this.state.timeRemaining * 1000;
           this.state.isPaused = false;
           this.state.status = "PLAYING";
+          for (const [sessionId, deadline] of this.pendingQuestionDeadlines) {
+            if (deadline > Date.now()) continue;
+            const pendingClient = this.clients.find((current) => current.sessionId === sessionId);
+            const pendingPlayer = this.state.players.get(sessionId);
+            this.pendingQuestionDeadlines.delete(sessionId);
+            if (pendingClient && pendingPlayer?.isAlive) this.sendNextQuestion(pendingClient, pendingPlayer);
+          }
           this.broadcast("match_resumed");
           break;
         }
@@ -496,6 +536,8 @@ export class TowerRoom extends Room<GameState> {
           this.playerLastAnswerCorrect.clear();
           this.blockScoreLedger.clear();
           this.pendingBlockDrops.clear();
+          this.pendingFreeBlocks.clear();
+          this.pendingQuestionDeadlines.clear();
           this.state.status = "LOBBY";
           this.state.timeRemaining = 180;
           this.state.scoreMultiplier = 1.0;
@@ -741,14 +783,20 @@ export class TowerRoom extends Room<GameState> {
     }
 
     this.playerQuestions.delete(client.sessionId);
+    this.pendingQuestionDeadlines.delete(client.sessionId);
+    this.pendingFreeBlocks.delete(client.sessionId);
     this.playerLastAnswerCorrect.delete(client.sessionId);
     this.pendingBlockDrops.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
   }
 
   private async finishMatch() {
+    if (this.state.status === "FINISHED") return;
     this.gameTimer?.clear();
+    this.gameDeadlineMs = undefined;
     this.botTimer?.clear();
+    this.pendingQuestionDeadlines.clear();
+    this.pendingFreeBlocks.clear();
     this.state.status = "FINISHED";
 
     const allPlayers = Array.from(this.state.players.values());
@@ -789,7 +837,7 @@ export class TowerRoom extends Room<GameState> {
           match = await prisma.match.create({
             data: {
               roomCode: this.state.roomCode, status: "FINISHED", hostId: hostUser.id,
-              durationSeconds: Math.max(1, 180 - this.state.timeRemaining),
+              durationSeconds: Math.max(1, this.gameDurationSeconds - this.state.timeRemaining),
               participants: { create: participantData },
             },
           });
@@ -810,6 +858,8 @@ export class TowerRoom extends Room<GameState> {
   onDispose() {
     this.gameTimer?.clear();
     this.botTimer?.clear();
+    this.pendingQuestionDeadlines.clear();
+    this.pendingFreeBlocks.clear();
     console.log(`[TowerRoom ${this.state.roomCode}] Disposed`);
   }
 }

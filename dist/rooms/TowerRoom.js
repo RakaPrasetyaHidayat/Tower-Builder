@@ -13,6 +13,7 @@ function generateRoomCode() {
     }
     return code;
 }
+const FREEZE_DURATION_MS = 5000;
 // Acak soal tanpa pengulangan per sesi
 function shuffleQuestions(questions) {
     const arr = [...questions];
@@ -27,13 +28,16 @@ class TowerRoom extends colyseus_1.Room {
     constructor() {
         super(...arguments);
         this.maxClients = 31;
+        this.gameDurationSeconds = 180;
         // Per-player question queues (sessionId → shuffled question list)
         this.playerQuestions = new Map();
         this.customQuestions = [];
+        this.pendingQuestionDeadlines = new Map();
         // Track apakah jawaban terakhir player benar (untuk syarat card choice di QB mode)
         this.playerLastAnswerCorrect = new Map();
         this.blockScoreLedger = new Map();
         this.pendingBlockDrops = new Map();
+        this.pendingFreeBlocks = new Map();
     }
     onCreate(options) {
         this.setState(new GameState_1.GameState());
@@ -95,6 +99,12 @@ class TowerRoom extends colyseus_1.Room {
             const player = this.state.players.get(client.sessionId);
             if (!player || !player.isAlive)
                 return;
+            if (this.pendingQuestionDeadlines.has(client.sessionId))
+                return;
+            const freeBlocksRemaining = this.pendingFreeBlocks.get(client.sessionId) ?? 0;
+            const isAuthorizedFreePlacement = data.isAutoPlace === true && freeBlocksRemaining > 0;
+            if (data.isAutoPlace && !isAuthorizedFreePlacement)
+                return;
             const now = Date.now();
             const dropStartedAt = this.pendingBlockDrops.get(client.sessionId);
             this.pendingBlockDrops.delete(client.sessionId);
@@ -112,9 +122,15 @@ class TowerRoom extends colyseus_1.Room {
                 }
             }
             // Question Building: cek apakah player boleh meletakkan blok
-            if (this.state.gameMode === "question_building" && !player.canPlaceBlock) {
+            if (this.state.gameMode === "question_building" && !player.canPlaceBlock && !isAuthorizedFreePlacement) {
                 client.send("action_rejected", { reason: "Jawab pertanyaan dulu!" });
                 return;
+            }
+            if (isAuthorizedFreePlacement) {
+                if (freeBlocksRemaining === 1)
+                    this.pendingFreeBlocks.delete(client.sessionId);
+                else
+                    this.pendingFreeBlocks.set(client.sessionId, freeBlocksRemaining - 1);
             }
             const isPerfect = data.perfect;
             player.towerHeight = data.height;
@@ -225,6 +241,8 @@ class TowerRoom extends colyseus_1.Room {
             const player = this.state.players.get(client.sessionId);
             if (!player || !player.isAlive)
                 return;
+            if (player.canPlaceBlock || this.pendingQuestionDeadlines.has(client.sessionId))
+                return;
             const questions = this.playerQuestions.get(client.sessionId);
             if (!questions?.length)
                 return;
@@ -256,10 +274,19 @@ class TowerRoom extends colyseus_1.Room {
                     penaltyMs: 3000,
                 });
                 // Setelah 3 detik, kirim soal berikutnya
+                const deadline = Date.now() + 3000;
+                this.pendingQuestionDeadlines.set(client.sessionId, deadline);
                 this.clock.setTimeout(() => {
-                    if (player.isAlive && this.state.status === "PLAYING") {
-                        this.sendNextQuestion(client, player);
+                    if (this.pendingQuestionDeadlines.get(client.sessionId) !== deadline)
+                        return;
+                    if (this.state.status === "PAUSED")
+                        return;
+                    if (this.state.status !== "PLAYING" || !player.isAlive) {
+                        this.pendingQuestionDeadlines.delete(client.sessionId);
+                        return;
                     }
+                    this.pendingQuestionDeadlines.delete(client.sessionId);
+                    this.sendNextQuestion(client, player);
                 }, 3000);
             }
         });
@@ -276,6 +303,7 @@ class TowerRoom extends colyseus_1.Room {
                     break;
                 }
                 case "LIQUID_BUDGET": {
+                    this.pendingFreeBlocks.set(player.sessionId, (this.pendingFreeBlocks.get(player.sessionId) ?? 0) + 2);
                     client.send("card_applied", { cardType: "LIQUID_BUDGET", blocks: 2 });
                     this.broadcast("feed_notification", { message: `🏗️ Anggaran Cair menyusun 2 blok gratis untuk ${player.nickname}!` });
                     break;
@@ -343,8 +371,14 @@ class TowerRoom extends colyseus_1.Room {
                     }
                     this.state.status = "PLAYING";
                     this.state.isPaused = false;
-                    const duration = data.durationSeconds || 180;
+                    this.pendingQuestionDeadlines.clear();
+                    const requestedDuration = Number(data.durationSeconds);
+                    const duration = Number.isFinite(requestedDuration) && requestedDuration > 0
+                        ? Math.min(3600, Math.floor(requestedDuration))
+                        : 180;
+                    this.gameDurationSeconds = duration;
                     this.state.timeRemaining = duration;
+                    this.gameDeadlineMs = Date.now() + duration * 1000;
                     // Inisialisasi question queue untuk semua player saat game mulai
                     if (this.state.gameMode === "question_building") {
                         this.state.players.forEach((p, sId) => {
@@ -365,24 +399,39 @@ class TowerRoom extends colyseus_1.Room {
                     this.gameTimer?.clear();
                     this.gameTimer = this.clock.setInterval(() => {
                         if (!this.state.isPaused && this.state.status === "PLAYING") {
-                            this.state.timeRemaining -= 1;
-                            if (this.state.timeRemaining <= 0)
+                            const remaining = Math.max(0, Math.ceil(((this.gameDeadlineMs ?? Date.now()) - Date.now()) / 1000));
+                            this.state.timeRemaining = remaining;
+                            if (remaining === 0)
                                 this.finishMatch();
                         }
-                    }, 1000);
+                    }, 250);
                     this.startBotSimulation();
                     this.broadcast("match_started", { timeRemaining: duration, gameMode: this.state.gameMode });
                     break;
                 }
                 case "pause_game": {
+                    if (this.gameDeadlineMs !== undefined) {
+                        this.state.timeRemaining = Math.max(0, Math.ceil((this.gameDeadlineMs - Date.now()) / 1000));
+                        this.gameDeadlineMs = undefined;
+                    }
                     this.state.isPaused = true;
                     this.state.status = "PAUSED";
                     this.broadcast("match_paused");
                     break;
                 }
                 case "resume_game": {
+                    this.gameDeadlineMs = Date.now() + this.state.timeRemaining * 1000;
                     this.state.isPaused = false;
                     this.state.status = "PLAYING";
+                    for (const [sessionId, deadline] of this.pendingQuestionDeadlines) {
+                        if (deadline > Date.now())
+                            continue;
+                        const pendingClient = this.clients.find((current) => current.sessionId === sessionId);
+                        const pendingPlayer = this.state.players.get(sessionId);
+                        this.pendingQuestionDeadlines.delete(sessionId);
+                        if (pendingClient && pendingPlayer?.isAlive)
+                            this.sendNextQuestion(pendingClient, pendingPlayer);
+                    }
                     this.broadcast("match_resumed");
                     break;
                 }
@@ -391,11 +440,16 @@ class TowerRoom extends colyseus_1.Room {
                         return;
                     const target = this.state.players.get(data.targetSessionId);
                     if (target) {
-                        target.isFrozen = !target.isFrozen;
-                        target.frozenUntil = 0;
+                        if (target.isFrozen) {
+                            target.isFrozen = false;
+                            target.frozenUntil = 0;
+                        }
+                        else {
+                            this.freezePlayer(target);
+                        }
                         this.broadcast("feed_notification", {
                             message: target.isFrozen
-                                ? `Game Master membekukan ${target.nickname}! Sultan harus melepas freeze secara manual.`
+                                ? `Game Master membekukan ${target.nickname} selama 5 detik!`
                                 : `Game Master melepas pembekuan ${target.nickname}.`,
                         });
                     }
@@ -439,6 +493,8 @@ class TowerRoom extends colyseus_1.Room {
                     this.playerLastAnswerCorrect.clear();
                     this.blockScoreLedger.clear();
                     this.pendingBlockDrops.clear();
+                    this.pendingFreeBlocks.clear();
+                    this.pendingQuestionDeadlines.clear();
                     this.state.status = "LOBBY";
                     this.state.timeRemaining = 180;
                     this.state.scoreMultiplier = 1.0;
@@ -511,12 +567,11 @@ class TowerRoom extends colyseus_1.Room {
                 break;
             }
             case "STALLED_PROJECT": {
-                target.isFrozen = true;
-                target.frozenUntil = 0;
+                this.freezePlayer(target);
                 this.clients.find((client) => client.sessionId === target.sessionId)?.send("sabotage_notification", {
-                    message: `${attacker.nickname} membekukan proyek Anda! Sultan harus melepas freeze secara manual.`,
+                    message: `${attacker.nickname} membekukan proyek Anda selama 5 detik!`,
                 });
-                this.broadcast("feed_notification", { message: `⏸️ Proyek ${target.nickname} dibekukan oleh ${attacker.nickname}; menunggu Sultan melepas freeze.` });
+                this.broadcast("feed_notification", { message: `⏸️ Proyek ${target.nickname} dibekukan oleh ${attacker.nickname} selama 5 detik.` });
                 break;
             }
             case "BUILDING_EVICTION": {
@@ -537,6 +592,18 @@ class TowerRoom extends colyseus_1.Room {
                 break;
             }
         }
+    }
+    freezePlayer(target) {
+        const frozenUntil = Date.now() + FREEZE_DURATION_MS;
+        target.isFrozen = true;
+        target.frozenUntil = frozenUntil;
+        this.clock.setTimeout(() => {
+            if (target.frozenUntil !== frozenUntil)
+                return;
+            target.isFrozen = false;
+            target.frozenUntil = 0;
+            this.broadcast("feed_notification", { message: `Pembekuan ${target.nickname} berakhir.` });
+        }, FREEZE_DURATION_MS);
     }
     sendCardChoice(client, height) {
         const buffs = [
@@ -672,13 +739,20 @@ class TowerRoom extends colyseus_1.Room {
             }
         }
         this.playerQuestions.delete(client.sessionId);
+        this.pendingQuestionDeadlines.delete(client.sessionId);
+        this.pendingFreeBlocks.delete(client.sessionId);
         this.playerLastAnswerCorrect.delete(client.sessionId);
         this.pendingBlockDrops.delete(client.sessionId);
         this.state.players.delete(client.sessionId);
     }
     async finishMatch() {
+        if (this.state.status === "FINISHED")
+            return;
         this.gameTimer?.clear();
+        this.gameDeadlineMs = undefined;
         this.botTimer?.clear();
+        this.pendingQuestionDeadlines.clear();
+        this.pendingFreeBlocks.clear();
         this.state.status = "FINISHED";
         const allPlayers = Array.from(this.state.players.values());
         let playersArr = allPlayers.filter(p => p.towerHeight > 0 || p.score > 0 || p.role === "PLAYER");
@@ -715,7 +789,7 @@ class TowerRoom extends colyseus_1.Room {
                     match = await db_1.prisma.match.create({
                         data: {
                             roomCode: this.state.roomCode, status: "FINISHED", hostId: hostUser.id,
-                            durationSeconds: Math.max(1, 180 - this.state.timeRemaining),
+                            durationSeconds: Math.max(1, this.gameDurationSeconds - this.state.timeRemaining),
                             participants: { create: participantData },
                         },
                     });
@@ -738,6 +812,8 @@ class TowerRoom extends colyseus_1.Room {
     onDispose() {
         this.gameTimer?.clear();
         this.botTimer?.clear();
+        this.pendingQuestionDeadlines.clear();
+        this.pendingFreeBlocks.clear();
         console.log(`[TowerRoom ${this.state.roomCode}] Disposed`);
     }
 }
